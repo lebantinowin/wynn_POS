@@ -15,6 +15,7 @@ Legend: ✅ Completed · 🟡 In progress · ⬜ Not started · ⏸ Waiting for 
 | Design | Prepare system blueprint and data outline | ✅ | grocery-system-blueprint.md |
 | Design | Prepare initial screen wireframes | ✅ | Checkout, product setup, stock correction, mobile dashboard sample |
 | Design | Add sidebar and remove staff roles | ✅ | Owner navigation added to wireframes and plan |
+| Design | Modernize application UI/UX | ✅ | Locally bundled Inter, muted colors, icon sidebar, refined forms/tables, progressive purchasing forms; desktop/tablet/mobile layouts inspected |
 | Design | Approve current layout | ✅ | Owner approved current layout provisionally; may be edited later. Approval does not imply device validation. |
 | Design | Validate responsive layouts and workflow details | ⬜ | Visual/device validation and remaining screens pending |
 | Design | Design remaining screens | ⬜ | Inventory, purchasing, returns, cash closing, expenses, reports, settings |
@@ -33,7 +34,8 @@ Legend: ✅ Completed · 🟡 In progress · ⬜ Not started · ⏸ Waiting for 
 | Development | Payments and receipt preview | 🟡 | Sample cash/change, QR confirmation and receipt preview work; payment persistence, completed sales and reprints pending |
 | Development | Cash sessions and reconciliation | ⬜ | Opening cash, cash movements, closing differences |
 | Development | Offline storage and synchronization | ⬜ | Durable local sales, recovery, retries, duplicate prevention, sync freshness |
-| Development | Inventory and purchasing | 🟡 | Session delivery receiving, individual/package conversion, costs, supplier text, reference and expiry validation work; supplier management, batch depletion, purchase orders and waste pending |
+| Development | Inventory and purchasing | 🟡 | Session receiving, suppliers, multi-line purchase orders, partial/full delivery, actual costs and expiry validation work; database persistence, batch depletion and waste pending |
+| Development | Supplier and purchase-order prototype | ✅ | Supplier creation/editing, ordered/partial/received status, remaining quantities, stock integration and duplicate delivery-event protection |
 | Development | Inventory receiving prototype | ✅ | Stock updates and delivery history available in the same browser session |
 | Development | Returns, expenses and supplier balances | ⬜ | Traceable reversals and financial records |
 | Development | Analytics and reports | ⬜ | Sales, margins, inventory, waste, payments, expenses and recorded net profit |
@@ -45,7 +47,7 @@ Legend: ✅ Completed · 🟡 In progress · ⬜ Not started · ⏸ Waiting for 
 
 ## Current next task
 
-Review inventory receiving, then build supplier management and purchase-order workflows. MySQL setup remains deferred. Resolve financial and inventory-policy decisions before implementing dependent behavior. Current designs are approved and can be revised later.
+Review supplier management and purchase-order receiving, then build saved sale completion and receipt history in session storage. MySQL setup remains deferred. Resolve insufficient-stock and financial rules before implementing dependent behavior. Current designs are approved and can be revised later.
 
 ## Foundation verification
 
@@ -55,7 +57,11 @@ Product setup milestone: PHPUnit now passes 10 tests and 70 assertions, includin
 
 Inventory receiving milestone: 13 tests and 96 assertions pass, including case-to-base-unit stock updates, exact acquisition cost totals, invalid delivery rejection, and expiry requirements. Delivery records do not yet provide batch depletion, cost-of-goods allocation, supplier debt, payment or backups.
 
+Purchasing milestone: six new feature tests cover supplier creation/editing, duplicate supplier/option rejection, purchase-order snapshots, partial/full receiving, actual cost changes, all-line validation before stock updates, expiry requirements and duplicate event protection. Desktop page inspected. Laravel Boost project guidance installed as required by the generated AGENTS.md. No supplier emails are sent; supplier debt and payment remain pending.
+
 ## Progress rules
 
 Planning completion does not mean a feature is implemented. Development tasks become complete only when working behavior is demonstrated and relevant checks pass. Hardware integration remains pending until actual devices are available. No overall completion percentage is assigned because task size and implementation effort are not yet estimated.
 
+
+Latest full suite: 19 tests and 141 assertions passed. Updated Blade templates compile successfully.
