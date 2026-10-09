@@ -12,7 +12,7 @@
         @else
         <div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M3 21V7l9-4 9 4v14M7 21v-5h10v5M7 8h2m6 0h2M7 12h2m6 0h2"/></svg><h3>Your suppliers will appear here</h3><p>Add your first supplier to start creating purchase orders and tracking deliveries.</p></div>
         @endif
-        <form class="supplier-form" wire:submit="saveSupplier" x-show="supplierOpen" x-cloak>
+        <form class="supplier-form" wire:submit="saveSupplier" x-show="supplierOpen" x-cloak x-transition:enter="motion-enter" x-transition:enter-start="motion-hidden" x-transition:enter-end="motion-visible" x-transition:leave="motion-leave" x-transition:leave-start="motion-visible" x-transition:leave-end="motion-hidden">
             <h2>{{ $supplierEditingId ? 'Edit supplier' : 'New supplier' }}</h2>
             <div class="columns"><div><label>Supplier name<input wire:model="name" maxlength="120" placeholder="e.g. Central Wholesale"></label><label>Contact person <span class="muted">· Optional</span><input wire:model="contact" placeholder="Contact name"></label><label>Phone <span class="muted">· Optional</span><input type="tel" wire:model="phone" placeholder="Phone number"></label></div><div><label>Email <span class="muted">· Optional</span><input type="email" wire:model="email" placeholder="supplier@example.com"></label><label>Notes <span class="muted">· Optional</span><input wire:model="supplierNotes" maxlength="500" placeholder="Delivery days, contact preferences…"></label></div></div>
             <div class="form-actions"><button class="primary compact" type="submit" wire:loading.attr="disabled">Save supplier</button><button type="button" wire:click="cancelSupplierEdit" @click="supplierOpen=false">Cancel</button></div>
@@ -31,7 +31,7 @@
         </form>
     </details>
     @if($receivingOrder)
-    <form class="panel" wire:submit="receiveOrder">
+    <form class="panel" wire:submit="receiveOrder" wire:transition="order-receiving">
         <div class="section-heading"><div><h2>Receive {{ $receivingOrder['number'] }}</h2><p class="muted">{{ $receivingOrder['supplier'] }} · Enter only what arrived in this delivery.</p></div><span class="badge">{{ $receivingOrder['status'] }}</span></div>
         @foreach($receivingOrder['lines'] as $index=>$line)
         <article class="product" wire:key="delivery-{{ $receivingOrder['id'] }}-{{ $index }}"><h3>{{ $line['name'] }} — {{ $line['label'] }}</h3><p class="muted">Ordered {{ $line['quantity'] }} · Received {{ $line['received'] }} · Remaining {{ $line['quantity']-$line['received'] }} · {{ $line['units'] }} base units each</p><div class="option-form"><label>Received now<input type="number" min="0" max="{{ $line['quantity']-$line['received'] }}" wire:model="deliveries.{{ $index }}.quantity"></label><label>Actual unit cost<input type="number" min="0.01" step="0.01" wire:model="deliveries.{{ $index }}.cost"></label><label>Expiry date<input type="date" wire:model="deliveries.{{ $index }}.expiry"></label></div></article>
