@@ -10,12 +10,12 @@ final class SessionPurchasing
 {
     public static function suppliers(): array
     {
-        return session('demo.suppliers', []);
+        return PosStore::get('demo.suppliers', []);
     }
 
     public static function orders(): array
     {
-        return session('demo.orders', []);
+        return PosStore::get('demo.orders', []);
     }
 
     public static function money(string $amount): int
@@ -27,6 +27,12 @@ final class SessionPurchasing
 
     public static function saveSupplier(?string $id, array $data): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::saveSupplier($id, $data));
+
+            return;
+        }
+
         $data = array_map(fn ($value) => trim((string) $value), $data);
         Validator::make($data, ['name' => 'required|string|max:120', 'contact' => 'nullable|string|max:120',
             'phone' => 'nullable|string|max:40', 'email' => 'nullable|email|max:120', 'notes' => 'nullable|string|max:500'])->validate();
@@ -41,11 +47,17 @@ final class SessionPurchasing
         }
         $id ??= (string) Str::uuid();
         $suppliers[$id] = $data + ['id' => $id];
-        session()->put('demo.suppliers', $suppliers);
+        PosStore::put('demo.suppliers', $suppliers);
     }
 
     public static function createOrder(string $supplierId, string $notes, array $lines): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::createOrder($supplierId, $notes, $lines));
+
+            return;
+        }
+
         Validator::make(['supplierId' => $supplierId, 'notes' => $notes, 'lines' => $lines], [
             'supplierId' => 'required|string', 'notes' => 'nullable|string|max:500',
             'lines' => 'required|array|min:1|max:30', 'lines.*.optionId' => 'required|string|distinct',
@@ -74,12 +86,16 @@ final class SessionPurchasing
         $orders[$id] = ['id' => $id, 'number' => 'PO-'.str_pad((string) (count($orders) + 1), 5, '0', STR_PAD_LEFT),
             'supplierId' => $supplierId, 'supplier' => $supplier['name'], 'notes' => trim($notes),
             'lines' => $snapshots, 'status' => 'Ordered', 'createdAt' => now()->toIso8601String()];
-        session()->put('demo.orders', $orders);
+        PosStore::put('demo.orders', $orders);
     }
 
-    public static function receive(string $orderId, array $deliveries, string $reference, string $eventId): bool
+    public static function receive(string $orderId, array $deliveries, string $reference, string $eventId, string $dueDate = ''): bool
     {
-        $processed = session('demo.receivingEvents', []);
+        if (PosStore::needsTransaction()) {
+            return PosStore::atomic(fn () => self::receive($orderId, $deliveries, $reference, $eventId, $dueDate));
+        }
+
+        $processed = PosStore::get('demo.receivingEvents', []);
         if (in_array($eventId, $processed, true)) {
             return false;
         }
@@ -88,17 +104,20 @@ final class SessionPurchasing
         if (! $order || $order['status'] === 'Received') {
             throw ValidationException::withMessages(['delivery' => 'Order is unavailable or already fully received.']);
         }
-        Validator::make(['deliveries' => $deliveries, 'reference' => $reference], [
+        Validator::make(['deliveries' => $deliveries, 'reference' => $reference, 'dueDate' => $dueDate], [
             'deliveries' => 'required|array', 'deliveries.*.quantity' => 'required|integer|min:0|max:100000',
             'deliveries.*.cost' => ['required', 'regex:/^\d{1,7}(\.\d{1,2})?$/'],
-            'deliveries.*.expiry' => 'nullable|date_format:Y-m-d|after_or_equal:today',
+            'deliveries.*.expiry' => 'nullable|date_format:Y-m-d|after_or_equal:'.now('Asia/Shanghai')->toDateString(),
             'reference' => 'nullable|string|max:100',
+            'dueDate' => 'nullable|date_format:Y-m-d',
         ])->validate();
         if (array_keys($deliveries) !== array_keys($order['lines'])) {
             throw ValidationException::withMessages(['delivery' => 'Delivery lines must match the order.']);
         }
         $products = DemoCatalogue::products();
-        $receipts = session('demo.receiving', []);
+        $batches = SessionBatches::state();
+        $receipts = PosStore::get('demo.receiving', []);
+        $deliveryReceipts = [];
         $added = 0;
         foreach ($order['lines'] as $index => &$line) {
             $input = $deliveries[$index];
@@ -129,12 +148,16 @@ final class SessionPurchasing
             $product['stock'] += $baseQuantity;
             $line['received'] += $quantity;
             $added += $baseQuantity;
-            $receipts[] = ['id' => (string) Str::uuid(), 'orderId' => $orderId, 'eventId' => $eventId,
+            $receipt = ['id' => (string) Str::uuid(), 'orderId' => $orderId, 'eventId' => $eventId,
                 'productId' => $line['productId'], 'name' => $line['name'], 'option' => $line['label'],
                 'unitsPerOption' => $line['units'], 'quantity' => $quantity, 'baseQuantity' => $baseQuantity,
                 'before' => $before, 'after' => $product['stock'], 'costPerOption' => $cost, 'totalCost' => $cost * $quantity,
                 'supplier' => $order['supplier'], 'reference' => trim($reference), 'expiry' => $input['expiry'] ?? '',
-                'actor' => 'Owner preview', 'time' => now()->toIso8601String()];
+                'actor' => 'Owner', 'time' => now()->toIso8601String()];
+            $receipt['batchId'] = SessionBatches::add($batches, $product, $baseQuantity, 'Delivery', $receipt['id'],
+                $receipt['reference'] ?: $order['number'], $receipt['expiry'], $receipt['totalCost']);
+            $receipts[] = $receipt;
+            $deliveryReceipts[] = $receipt;
             unset($product);
         }
         unset($line);
@@ -150,7 +173,12 @@ final class SessionPurchasing
         $order['status'] = $complete ? 'Received' : 'Partially received';
         $orders[$orderId] = $order;
         $processed[] = $eventId;
-        session()->put(['demo.products' => $products, 'demo.orders' => $orders, 'demo.receiving' => $receipts, 'demo.receivingEvents' => $processed]);
+        $invoices = SessionPayables::invoices();
+        $invoice = SessionPayables::stageInvoice($order, $eventId, $deliveryReceipts, $reference, $dueDate);
+        $invoices[$invoice['id']] = $invoice;
+        SessionBatches::assertBalanced($batches, $products);
+        PosStore::put(['demo.products' => $products, 'demo.orders' => $orders, 'demo.receiving' => $receipts,
+            'demo.receivingEvents' => $processed, 'demo.supplierInvoices' => $invoices] + SessionBatches::changes($batches));
 
         return true;
     }

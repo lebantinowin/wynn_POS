@@ -6,10 +6,10 @@ final class DemoCatalogue
 {
     public static function products(): array
     {
-        return session()->get('demo.products', self::defaults());
+        return PosStore::get('demo.products', self::defaults());
     }
 
-    private static function defaults(): array
+    public static function defaults(): array
     {
         return [
             ['id' => 1, 'name' => 'Bottled drink', 'sku' => 'DRINK-001', 'category' => 'Beverages', 'stock' => 72, 'unit' => 'bottle', 'options' => [
@@ -28,31 +28,54 @@ final class DemoCatalogue
     {
         foreach (self::products() as $product) {
             foreach ($product['options'] as $option) {
-                if ($option['id'] === $id) return $option + ['name' => $product['name'], 'stock' => $product['stock'], 'productId' => $product['id']];
+                if ($option['id'] === $id) {
+                    return $option + ['name' => $product['name'], 'stock' => $product['stock'], 'productId' => $product['id']];
+                }
             }
         }
+
         return null;
     }
 
     public static function find(int $id): ?array
     {
-        foreach (self::products() as $product) if ($product['id'] === $id) return $product;
+        foreach (self::products() as $product) {
+            if ($product['id'] === $id) {
+                return $product;
+            }
+        }
+
         return null;
     }
 
     public static function save(array $product): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::save($product));
+
+            return;
+        }
+
         $products = self::products();
         $index = array_search($product['id'], array_column($products, 'id'), true);
-        if ($index === false) $products[] = $product;
-        else $products[$index] = $product;
-        session()->put('demo.products', $products);
+        if ($index === false) {
+            $products[] = $product;
+        } else {
+            $products[$index] = $product;
+        }
+        PosStore::put('demo.products', $products);
     }
 
     public static function recordCount(array $entry): void
     {
-        $history = session()->get('demo.counts', []);
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::recordCount($entry));
+
+            return;
+        }
+
+        $history = PosStore::get('demo.counts', []);
         $history[] = $entry;
-        session()->put('demo.counts', $history);
+        PosStore::put('demo.counts', $history);
     }
 }

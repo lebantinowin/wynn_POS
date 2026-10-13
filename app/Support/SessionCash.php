@@ -12,17 +12,17 @@ final class SessionCash
 
     public static function all(): array
     {
-        return session('demo.cashSessions', []);
+        return PosStore::get('demo.cashSessions', []);
     }
 
     public static function movements(): array
     {
-        return session('demo.cashMovements', []);
+        return PosStore::get('demo.cashMovements', []);
     }
 
     public static function expenses(): array
     {
-        return session('demo.expenses', []);
+        return PosStore::get('demo.expenses', []);
     }
 
     public static function active(): ?array
@@ -59,6 +59,10 @@ final class SessionCash
 
     public static function open(string $eventId, string $opening, string $notes): array
     {
+        if (PosStore::needsTransaction()) {
+            return PosStore::atomic(fn () => self::open($eventId, $opening, $notes));
+        }
+
         $sessions = self::all();
         foreach ($sessions as $cashSession) {
             if ($cashSession['eventId'] === $eventId) {
@@ -74,10 +78,10 @@ final class SessionCash
         $id = (string) Str::uuid();
         $cashSession = ['id' => $id, 'eventId' => $eventId, 'number' => 'SHIFT-'.str_pad((string) (count($sessions) + 1), 4, '0', STR_PAD_LEFT),
             'status' => 'Open', 'opening' => $amount, 'notes' => $notes, 'operator' => 'Owner', 'counter' => 'Counter 1',
-            'openedAt' => now()->toIso8601String(), 'closedAt' => null, 'closeEventId' => null, 'counted' => null, 'difference' => null,
+            'openedAt' => app(OfflineCheckout::class)->time()->toIso8601String(), 'closedAt' => null, 'closeEventId' => null, 'counted' => null, 'difference' => null,
             'closeNotes' => '', 'summary' => null];
         $sessions[$id] = $cashSession;
-        session()->put('demo.cashSessions', $sessions);
+        PosStore::put('demo.cashSessions', $sessions);
 
         return $cashSession;
     }
@@ -93,7 +97,8 @@ final class SessionCash
         }
         $methods = ['Cash' => ['in' => 0, 'out' => 0], 'GCash' => ['in' => 0, 'out' => 0], 'Maya' => ['in' => 0, 'out' => 0]];
         $sources = ['Sale' => ['in' => 0, 'out' => 0], 'Repayment' => ['in' => 0, 'out' => 0], 'Cash loan' => ['in' => 0, 'out' => 0],
-            'Expense' => ['in' => 0, 'out' => 0], 'Manual cash' => ['in' => 0, 'out' => 0], 'Return refund' => ['in' => 0, 'out' => 0]];
+            'Expense' => ['in' => 0, 'out' => 0], 'Manual cash' => ['in' => 0, 'out' => 0], 'Return refund' => ['in' => 0, 'out' => 0],
+            'Supplier payment' => ['in' => 0, 'out' => 0]];
         foreach (self::movements() as $entry) {
             if ($entry['cashSessionId'] === $id) {
                 $methods[$entry['method']][$entry['direction']] += $entry['amount'];
@@ -133,11 +138,17 @@ final class SessionCash
 
         return ['id' => (string) Str::uuid(), 'eventId' => $eventId, 'cashSessionId' => $active['id'] ?? null,
             'source' => $source, 'sourceId' => $sourceId, 'amount' => $amount, 'method' => $method, 'direction' => $direction,
-            'reference' => $reference, 'notes' => $notes, 'time' => now()->toIso8601String(), 'operator' => 'Owner'];
+            'reference' => $reference, 'notes' => $notes, 'time' => app(OfflineCheckout::class)->time()->toIso8601String(), 'operator' => 'Owner'];
     }
 
     public static function recordMovement(string $eventId, string $direction, string $amount, string $reason, ?string $expectedId = null): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::recordMovement($eventId, $direction, $amount, $reason, $expectedId));
+
+            return;
+        }
+
         $movements = self::movements();
         foreach ($movements as $movement) {
             if ($movement['source'] === 'Manual cash' && $movement['eventId'] === $eventId) {
@@ -149,11 +160,17 @@ final class SessionCash
         $entry = self::stageMovement($eventId, 'Manual cash', (string) Str::uuid(), SessionCredit::amount($amount), 'Cash',
             $direction, 'Drawer adjustment', $reason, $expectedId);
         $movements[] = $entry;
-        session()->put('demo.cashMovements', $movements);
+        PosStore::put('demo.cashMovements', $movements);
     }
 
     public static function expense(string $eventId, string $amount, string $category, string $method, string $notes, ?string $expectedId = null): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::expense($eventId, $amount, $category, $method, $notes, $expectedId));
+
+            return;
+        }
+
         $expenses = self::expenses();
         foreach ($expenses as $expense) {
             if ($expense['eventId'] === $eventId) {
@@ -173,11 +190,15 @@ final class SessionCash
         $expenses[$id] = $expense;
         $movements = self::movements();
         $movements[] = $movement;
-        session()->put(['demo.expenses' => $expenses, 'demo.cashMovements' => $movements]);
+        PosStore::put(['demo.expenses' => $expenses, 'demo.cashMovements' => $movements]);
     }
 
     public static function close(string $id, string $eventId, string $counted, string $closeNotes): array
     {
+        if (PosStore::needsTransaction()) {
+            return PosStore::atomic(fn () => self::close($id, $eventId, $counted, $closeNotes));
+        }
+
         $sessions = self::all();
         $cashSession = $sessions[$id] ?? null;
         if ($cashSession && $cashSession['closeEventId'] === $eventId) {
@@ -190,14 +211,14 @@ final class SessionCash
         $closeNotes = trim($closeNotes);
         Validator::make(compact('closeNotes'), ['closeNotes' => $difference !== 0 ? 'required|string|min:3|max:500' : 'nullable|string|max:500'])->validate();
         $cashSession['status'] = 'Closed';
-        $cashSession['closedAt'] = now()->toIso8601String();
+        $cashSession['closedAt'] = app(OfflineCheckout::class)->time()->toIso8601String();
         $cashSession['closeEventId'] = $eventId;
         $cashSession['counted'] = $amount;
         $cashSession['difference'] = $difference;
         $cashSession['closeNotes'] = $closeNotes;
         $cashSession['summary'] = $summary;
         $sessions[$id] = $cashSession;
-        session()->put('demo.cashSessions', $sessions);
+        PosStore::put('demo.cashSessions', $sessions);
 
         return $cashSession;
     }

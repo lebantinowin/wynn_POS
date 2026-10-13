@@ -1,5 +1,6 @@
 <div>
-    <div wire:offline class="notice">Connection unavailable. Offline sales are not implemented yet.</div>
+    <div wire:offline class="notice">Connection unavailable. Use the prepared offline checkout in this browser. <a href="/offline-checkout.html">Open offline checkout</a></div>
+    <div class="notice spread"><span>Keep selling during a connection interruption after preparing this browser with an open cash session.</span><a class="button" href="/offline-checkout.html">Offline checkout</a></div>
     @if($message)<p class="success" role="status">{{ $message }}</p>@endif
     @if($errors->any())<div class="notice" role="alert">@foreach($errors->all() as $error)<p class="error">{{ $error }}</p>@endforeach</div>@endif
     <div class="notice spread"><span>{{ $cashSession ? $cashSession['number'].' · Open at Counter 1' : 'Open a cash session before completing a sale.' }}</span><a class="button" href="/cash" wire:navigate>{{ $cashSession ? 'Manage cash session' : 'Open cash session' }}</a></div>
@@ -15,6 +16,7 @@
                 <article class="pos-product {{ $inCartUnits ? 'in-cart' : '' }}" wire:key="pos-product-{{ $product['id'] }}">
                     <img class="product-image" src="{{ asset('images/product-placeholder.svg') }}" width="240" height="180" alt="Image placeholder for {{ $product['name'] }}" loading="lazy">
                     <h3>{{ $product['name'] }}</h3><p class="muted">{{ $product['stock'] }} {{ $product['unit'] }}s · {{ $product['sku'] }}</p>
+                    <p class="muted">{{ $batchStock[$product['id']]['sellable'] ?? 0 }} sellable · {{ $batchStock[$product['id']]['expired'] ?? 0 }} expired</p>
                     @if($inCartUnits)<span class="cart-status" role="status">✓ In cart · {{ $inCartUnits }} {{ $product['unit'] }}{{ $inCartUnits===1 ? '' : 's' }}</span>@endif
                     <div class="options">@foreach($product['options'] as $option)<button class="{{ ($optionQuantities[$option['id']] ?? 0) ? 'selected-option' : '' }}" wire:click="add('{{ $option['id'] }}')"><span>{{ $option['label'] }}@if($optionQuantities[$option['id']] ?? 0)<small>{{ $optionQuantities[$option['id']] }} in cart</small>@endif</span><strong>{{ number_format($option['price']/100,2) }}</strong></button>@endforeach</div>
                 </article>
@@ -33,7 +35,7 @@
             @else<p class="notice">Use the printed {{ $method }} QR at the counter. Verify the received payment in the app.</p><label class="check"><input type="checkbox" wire:model="confirmed"> I verified the payment in the app</label>@endif
             <button class="primary" wire:click="complete" wire:loading.attr="disabled" @disabled(!$lines || !$cashSession)>Complete sale</button>
             <div class="form-actions"><button wire:click="preview" wire:loading.attr="disabled" @disabled(!$lines)>Preview receipt</button><a class="button" href="/sales" wire:navigate>Receipt history</a></div>
-            <p class="muted">Completing a sale deducts stock and saves it in this browser session. Preview does not change stock. *Currency and tax settings pending.</p>
+            <p class="muted">Completing a sale deducts stock and saves the receipt. Preview does not change stock. *Currency and tax settings pending.</p>
         </section>
     </div>
     @if($receipt)<section class="panel receipt printable-receipt" wire:transition="receipt-preview">@include('components.receipt', ['receipt'=>$receipt, 'isCopy'=>false])</section>@endif

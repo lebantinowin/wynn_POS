@@ -59,7 +59,7 @@ class ProductsTest extends TestCase
         $entry = session('demo.counts')[0];
         $this->assertSame(72, $entry['before']);
         $this->assertSame(-2, $entry['difference']);
-        $this->assertSame('Owner preview', $entry['actor']);
+        $this->assertSame('Owner', $entry['actor']);
         Livewire::test(Products::class)->call('startCount', 1)->set('physicalCount', -1)->set('countReason', 'Invalid count')->call('saveCount')->assertHasErrors('physicalCount');
         $this->assertSame(70, DemoCatalogue::find(1)['stock']);
     }

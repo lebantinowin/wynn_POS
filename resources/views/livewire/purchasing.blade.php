@@ -1,6 +1,7 @@
 <div x-data="{supplierOpen:false}">
     @if($message)<p class="success" role="status">{{ $message }}</p>@endif
     @if($errors->any())<section class="notice" role="alert">@foreach($errors->all() as $error)<p class="error">{{ $error }}</p>@endforeach</section>@endif
+    <p><a class="button" href="#supplier-balances">Supplier balances & payments ↓</a></p>
     <section class="panel">
         <div class="section-heading"><div><h2>Supplier directory</h2><p class="muted">Your purchasing contacts, in one place.</p></div><button class="primary compact" type="button" wire:click="cancelSupplierEdit" @click="supplierOpen=true">+ Add supplier</button></div>
         @if($suppliers)
@@ -36,7 +37,7 @@
         @foreach($receivingOrder['lines'] as $index=>$line)
         <article class="product" wire:key="delivery-{{ $receivingOrder['id'] }}-{{ $index }}"><h3>{{ $line['name'] }} — {{ $line['label'] }}</h3><p class="muted">Ordered {{ $line['quantity'] }} · Received {{ $line['received'] }} · Remaining {{ $line['quantity']-$line['received'] }} · {{ $line['units'] }} base units each</p><div class="option-form"><label>Received now<input type="number" min="0" max="{{ $line['quantity']-$line['received'] }}" wire:model="deliveries.{{ $index }}.quantity"></label><label>Actual unit cost<input type="number" min="0.01" step="0.01" wire:model="deliveries.{{ $index }}.cost"></label><label>Expiry date<input type="date" wire:model="deliveries.{{ $index }}.expiry"></label></div></article>
         @endforeach
-        <label>Invoice / delivery reference <span class="muted">· Optional</span><input wire:model="reference" maxlength="100" placeholder="e.g. INV-001"></label><div class="form-actions"><button class="primary compact" type="submit" wire:loading.attr="disabled">Record delivery</button><button type="button" wire:click="cancelReceiving">Cancel</button></div><p class="muted">Leave undelivered lines at zero. Expiry-tracked products require a date. Recorded deliveries appear in Inventory history.</p>
+        <label>Payment due date (optional)<input type="date" wire:model="dueDate"></label><label>Invoice / delivery reference <span class="muted">· Optional</span><input wire:model="reference" maxlength="100" placeholder="e.g. INV-001"></label><div class="form-actions"><button class="primary compact" type="submit" wire:loading.attr="disabled">Record delivery</button><button type="button" wire:click="cancelReceiving">Cancel</button></div><p class="muted">Leave undelivered lines at zero. Expiry-tracked products require a date. Recorded deliveries appear in Inventory history and create an unpaid bill below.</p>
     </form>
     @endif
     <section class="panel">
@@ -47,4 +48,5 @@
         <div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 7h6M9 11h6M9 15h3"/></svg><h3>No purchase orders yet</h3><p>Create an order above. Partial and completed deliveries will be tracked here.</p></div>
         @endforelse
     </section>
+    <livewire:payables />
 </div>

@@ -12,11 +12,17 @@ final class SessionLosses
 
     public static function all(): array
     {
-        return session('demo.losses', []);
+        return PosStore::get('demo.losses', []);
     }
 
-    public static function record(string $eventId, string $optionId, mixed $quantity, string $reason, string $notes, string $unitCost): void
+    public static function record(string $eventId, string $optionId, mixed $quantity, string $reason, string $notes, string $unitCost, string $batchId = ''): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => self::record($eventId, $optionId, $quantity, $reason, $notes, $unitCost, $batchId));
+
+            return;
+        }
+
         $losses = self::all();
         foreach ($losses as $loss) {
             if ($loss['eventId'] === $eventId) {
@@ -44,14 +50,26 @@ final class SessionLosses
             $cost = (int) $whole * 100 + (int) str_pad($fraction, 2, '0');
         }
         $before = $product['stock'];
+        $id = (string) Str::uuid();
+        $batches = SessionBatches::state();
+        $allocations = SessionBatches::consume($batches, $product['id'], $baseQuantity, 'Stock loss', $id, 'quantity', false, $batchId);
+        $batchCost = BatchCost::summarize($allocations);
+        $totalCost = $batchCost['cost'];
+        $costBasis = 'Recorded batch acquisition costs';
+        if ($batchCost['unknownUnits'] > 0 && $cost !== null) {
+            $totalCost = $batchCost['knownCost'] + BatchCost::portion($cost, $option['units'], $batchCost['unknownUnits']);
+            $costBasis = 'Batch costs plus manual estimate for unknown stock';
+        }
         $product['stock'] -= $baseQuantity;
         $products = DemoCatalogue::products();
         $index = array_search($product['id'], array_column($products, 'id'), true);
         $products[$index] = $product;
-        $losses[] = ['id' => (string) Str::uuid(), 'eventId' => $eventId, 'productId' => $product['id'], 'name' => $product['name'],
+        $losses[] = ['id' => $id, 'eventId' => $eventId, 'productId' => $product['id'], 'name' => $product['name'],
             'option' => $option['label'], 'quantity' => (int) $quantity, 'baseQuantity' => $baseQuantity, 'reason' => $reason,
-            'notes' => trim($notes), 'unitCost' => $cost, 'totalCost' => $cost !== null ? $cost * (int) $quantity : null,
-            'before' => $before, 'after' => $product['stock'], 'actor' => 'Owner', 'time' => now()->toIso8601String()];
-        session()->put(['demo.products' => $products, 'demo.losses' => $losses]);
+            'notes' => trim($notes), 'unitCost' => $cost, 'totalCost' => $totalCost,
+            'knownCost' => $totalCost ?? $batchCost['knownCost'], 'unknownUnits' => $batchCost['unknownUnits'], 'costBasis' => $costBasis,
+            'batchAllocations' => $allocations, 'before' => $before, 'after' => $product['stock'], 'actor' => 'Owner', 'time' => now()->toIso8601String()];
+        SessionBatches::assertBalanced($batches, $products);
+        PosStore::put(['demo.products' => $products, 'demo.losses' => $losses] + SessionBatches::changes($batches));
     }
 }

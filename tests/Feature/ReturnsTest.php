@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Livewire\Sales;
 use App\Support\DemoCatalogue;
+use App\Support\PosStore;
 use App\Support\SessionAnalytics;
+use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionLosses;
@@ -25,6 +27,13 @@ class ReturnsTest extends TestCase
             $product['baseCost'] = $cost;
             DemoCatalogue::save($product);
         }
+        $state = SessionBatches::state();
+        foreach ($state['batches'] as &$batch) {
+            $batch['totalCost'] = DemoCatalogue::find($batch['productId'])['baseCost'] * $batch['initialQuantity'];
+            $batch['source'] = 'Opening stock';
+        }
+        unset($batch);
+        PosStore::put(SessionBatches::changes($state));
     }
 
     private function inputs(string $saleId, array $quantities, string $disposition = 'Restock'): array
@@ -249,6 +258,10 @@ class ReturnsTest extends TestCase
         $product['baseCost'] = null;
         DemoCatalogue::save($product);
         $sale = SessionSales::complete('unknown', ['drink-one' => 1], 'Cash', '20', false);
+        $sales = SessionSales::all();
+        $sales[$sale['id']]['lines'][0]['cost'] = null;
+        unset($sales[$sale['id']]['lines'][0]['costMethod']);
+        PosStore::put('demo.sales', $sales);
         SessionReturns::complete('unknown-return', $sale['id'], $this->inputs($sale['id'], [1], 'Discard'), 'Cash', true, 'Returned damaged stock');
         $this->assertNull(SessionLosses::all()[0]['totalCost']);
         $this->assertNull(SessionAnalytics::summarize(7)['operatingProfit']);
@@ -256,6 +269,10 @@ class ReturnsTest extends TestCase
         $product['stock'] = DemoCatalogue::find(1)['stock'];
         DemoCatalogue::save($product);
         $free = SessionSales::complete('free', ['drink-one' => 1], 'Cash', '20', false);
+        $sales = SessionSales::all();
+        $sales[$free['id']]['lines'][0]['cost'] = 0;
+        unset($sales[$free['id']]['lines'][0]['costMethod']);
+        PosStore::put('demo.sales', $sales);
         $return = SessionReturns::complete('free-return', $free['id'], $this->inputs($free['id'], [1], 'Discard'), 'Cash', true, 'Free stock returned damaged');
         $this->assertSame(0, $return['lines'][0]['cost']);
         $this->assertSame(0, SessionLosses::all()[1]['totalCost']);
@@ -265,7 +282,7 @@ class ReturnsTest extends TestCase
     {
         $sale = SessionSales::complete('legacy', ['drink-one' => 1], 'Cash', '20', false);
         $sales = SessionSales::all();
-        unset($sales[$sale['id']]['customer'], $sales[$sale['id']]['lines'][0]['cost']);
+        unset($sales[$sale['id']]['customer'], $sales[$sale['id']]['lines'][0]['cost'], $sales[$sale['id']]['lines'][0]['costMethod']);
         session()->put('demo.sales', $sales);
         $this->get('/sales')->assertOk()->assertSee('Transaction history')->assertSee($sale['number']);
         Livewire::test(Sales::class)->call('viewReceipt', $sale['id'])->assertSee('COPY')

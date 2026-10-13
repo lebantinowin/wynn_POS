@@ -1,3 +1,3 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-php -d extension=mbstring -d extension=fileinfo -S 127.0.0.1:8000 -t public
+php -d extension=mbstring -d extension=fileinfo -d extension=pdo_pgsql -S 127.0.0.1:8000 -t public

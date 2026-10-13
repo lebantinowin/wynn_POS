@@ -3,6 +3,7 @@
 namespace App\Livewire;
 
 use App\Support\DemoCatalogue;
+use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionSales;
@@ -146,7 +147,7 @@ class Checkout extends Component
         $this->reset('cart', 'search', 'received', 'confirmed', 'customerId', 'dueDate');
         $this->saleEventId = (string) Str::uuid();
         $this->receipt = $sale;
-        $this->message = "Sale {$sale['number']} completed in this session. Stock updated.";
+        $this->message = "Sale {$sale['number']} completed. Stock and batch costs updated.";
     }
 
     public function render(): View
@@ -154,6 +155,7 @@ class Checkout extends Component
         $products = array_filter(DemoCatalogue::products(), fn ($p) => $this->search === '' || str_contains(strtolower($p['name'].' '.$p['sku'].' '.implode(' ', array_column($p['options'], 'barcode'))), strtolower($this->search)));
         $lines = $this->lines();
 
-        return view('livewire.checkout', ['products' => $products, 'lines' => $lines, 'total' => array_sum(array_column($lines, 'total')), 'customers' => SessionCredit::customers(), 'cashSession' => SessionCash::active()]);
+        return view('livewire.checkout', ['products' => $products, 'lines' => $lines, 'total' => array_sum(array_column($lines, 'total')),
+            'customers' => SessionCredit::customers(), 'cashSession' => SessionCash::active(), 'batchStock' => SessionBatches::overview()['products']]);
     }
 }

@@ -10,7 +10,7 @@ final class SessionSales
 {
     public static function all(): array
     {
-        return session('demo.sales', []);
+        return PosStore::get('demo.sales', []);
     }
 
     public static function draft(array $cart, string $method, string $received, bool $confirmed, string $customerId = '', string $dueDate = ''): array
@@ -43,13 +43,20 @@ final class SessionSales
             }
         } elseif ($method === 'Credit') {
             SessionCredit::customer($customerId);
-            Validator::make(['dueDate' => $dueDate], ['dueDate' => 'nullable|date_format:Y-m-d|after_or_equal:'.now('Asia/Shanghai')->toDateString()])->validate();
+            Validator::make(['dueDate' => $dueDate], ['dueDate' => 'nullable|date_format:Y-m-d|after_or_equal:'.app(OfflineCheckout::class)->time()->timezone('Asia/Shanghai')->toDateString()])->validate();
         } elseif (! $confirmed) {
             throw ValidationException::withMessages(['confirmed' => 'Confirm payment in the payment app first.']);
         }
 
+        $batches = SessionBatches::state();
+        foreach ($lines as &$line) {
+            $line['batchAllocations'] = SessionBatches::consume($batches, $line['productId'], $line['baseQuantity'], 'Preview', '', 'cart', true);
+            self::applyBatchCost($line);
+        }
+        unset($line);
+
         return ['shop' => config('app.name'), 'lines' => $lines, 'total' => $total, 'method' => $method,
-            'costBasis' => 'Configured purchase cost per base unit',
+            'costBasis' => 'Recorded batch acquisition costs (FEFO)',
             'cashReceived' => $cash, 'change' => $cash !== null ? $cash - $total : 0,
             'paymentConfirmed' => in_array($method, ['GCash', 'Maya']) && $confirmed,
             'customer' => $method === 'Credit' ? SessionCredit::customer($customerId)['name'] : null,
@@ -59,6 +66,10 @@ final class SessionSales
 
     public static function complete(string $eventId, array $cart, string $method, string $received, bool $confirmed, string $customerId = '', string $dueDate = '', ?string $cashSessionId = null): array
     {
+        if (PosStore::needsTransaction()) {
+            return PosStore::atomic(fn () => self::complete($eventId, $cart, $method, $received, $confirmed, $customerId, $dueDate, $cashSessionId));
+        }
+
         $sales = self::all();
         foreach ($sales as $sale) {
             if ($sale['eventId'] === $eventId) {
@@ -72,7 +83,8 @@ final class SessionSales
             $requirements[$line['productId']] = ($requirements[$line['productId']] ?? 0) + $line['baseQuantity'];
         }
         $products = DemoCatalogue::products();
-        $movements = session('demo.saleMovements', []);
+        $batches = SessionBatches::state();
+        $movements = PosStore::get('demo.saleMovements', []);
         $saleId = (string) Str::uuid();
         foreach ($products as &$product) {
             $deduction = $requirements[$product['id']] ?? 0;
@@ -85,13 +97,19 @@ final class SessionSales
             $before = $product['stock'];
             $product['stock'] -= $deduction;
             $movements[] = ['saleId' => $saleId, 'productId' => $product['id'], 'quantity' => -$deduction,
-                'before' => $before, 'after' => $product['stock'], 'reason' => 'Sale', 'time' => now()->toIso8601String()];
+                'before' => $before, 'after' => $product['stock'], 'reason' => 'Sale', 'time' => app(OfflineCheckout::class)->time()->toIso8601String()];
         }
         unset($product);
+        foreach ($draft['lines'] as &$line) {
+            $line['batchAllocations'] = SessionBatches::consume($batches, $line['productId'], $line['baseQuantity'], 'Sale', $saleId, 'cart', true);
+            self::applyBatchCost($line);
+        }
+        unset($line);
+        SessionBatches::assertBalanced($batches, $products);
         $sale = $draft + ['id' => $saleId, 'eventId' => $eventId, 'number' => 'WM-'.str_pad((string) (count($sales) + 1), 6, '0', STR_PAD_LEFT),
-            'status' => 'Completed', 'time' => now()->toIso8601String(), 'operator' => 'Owner', 'counter' => 'Counter 1', 'cashSessionId' => $cashSession['id']];
+            'status' => 'Completed', 'time' => app(OfflineCheckout::class)->time()->toIso8601String(), 'operator' => 'Owner', 'counter' => 'Counter 1', 'cashSessionId' => $cashSession['id']];
         $sales[$saleId] = $sale;
-        $changes = ['demo.products' => $products, 'demo.sales' => $sales, 'demo.saleMovements' => $movements];
+        $changes = ['demo.products' => $products, 'demo.sales' => $sales, 'demo.saleMovements' => $movements] + SessionBatches::changes($batches);
         if ($method === 'Credit') {
             $debts = SessionCredit::debts();
             $debt = SessionCredit::makeDebt($eventId, $customerId, 'Grocery credit', $sale['total'], $dueDate, '', $saleId);
@@ -102,8 +120,14 @@ final class SessionSales
             $movements[] = SessionCash::stageMovement($eventId, 'Sale', $saleId, $sale['total'], $method, 'in', $sale['number'], '', $cashSession['id']);
             $changes['demo.cashMovements'] = $movements;
         }
-        session()->put($changes);
+        PosStore::put($changes);
 
         return $sale;
+    }
+
+    private static function applyBatchCost(array &$line): void
+    {
+        $line = array_replace($line, BatchCost::summarize($line['batchAllocations']));
+        $line['costMethod'] = 'batch-v1';
     }
 }

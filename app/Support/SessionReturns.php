@@ -10,7 +10,7 @@ final class SessionReturns
 {
     public static function all(): array
     {
-        return session('demo.returns', []);
+        return PosStore::get('demo.returns', []);
     }
 
     public static function saleTotals(string $saleId): array
@@ -64,11 +64,21 @@ final class SessionReturns
             if ($quantity === 0) {
                 continue;
             }
+            $alreadyReturned = $line['quantity'] - $line['remaining'];
+            $allocations = SessionBatches::returnAllocations($line, $alreadyReturned * $line['units'], $line['units'] * $quantity);
+            if (($line['costMethod'] ?? '') === 'batch-v1' && array_sum(array_column($allocations, 'quantity')) !== $line['units'] * $quantity) {
+                throw ValidationException::withMessages(['return' => 'The saved cost allocation is missing. Review the original receipt before returning stock.']);
+            }
+            $cost = ($line['costMethod'] ?? '') === 'batch-v1' ? BatchCost::summarize($allocations)
+                : ['cost' => ($line['cost'] ?? null) !== null
+                    ? BatchCost::portion($line['cost'], $line['quantity'], $alreadyReturned + $quantity)
+                        - BatchCost::portion($line['cost'], $line['quantity'], $alreadyReturned)
+                    : null];
             $lines[] = ['lineIndex' => $index, 'productId' => $line['productId'], 'name' => $line['name'],
                 'label' => $line['label'], 'units' => $line['units'], 'quantity' => $quantity, 'baseQuantity' => $line['units'] * $quantity,
                 'price' => $line['price'], 'total' => $line['price'] * $quantity,
-                'cost' => ($line['cost'] ?? null) !== null ? intdiv($line['cost'], $line['quantity']) * $quantity : null,
-                'disposition' => $inputs[$index]['disposition']];
+                'costMethod' => $line['costMethod'] ?? 'legacy', 'batchAllocations' => $allocations,
+                'disposition' => $inputs[$index]['disposition']] + $cost;
         }
         if ($lines === []) {
             throw ValidationException::withMessages(['return' => 'Enter a return quantity on at least one line.']);
@@ -97,6 +107,10 @@ final class SessionReturns
 
     public static function complete(string $eventId, string $saleId, array $inputs, string $method, bool $confirmed, string $reason, ?string $cashSessionId = null): array
     {
+        if (PosStore::needsTransaction()) {
+            return PosStore::atomic(fn () => self::complete($eventId, $saleId, $inputs, $method, $confirmed, $reason, $cashSessionId));
+        }
+
         $returns = self::all();
         foreach ($returns as $return) {
             if ($return['eventId'] === $eventId) {
@@ -114,9 +128,10 @@ final class SessionReturns
         $number = 'RET-'.str_pad((string) (count($returns) + 1), 5, '0', STR_PAD_LEFT);
         $time = now()->toIso8601String();
         $products = DemoCatalogue::products();
-        $stockMovements = session('demo.returnMovements', []);
+        $batches = SessionBatches::state();
+        $stockMovements = PosStore::get('demo.returnMovements', []);
         $losses = SessionLosses::all();
-        foreach ($preview['lines'] as $line) {
+        foreach ($preview['lines'] as &$line) {
             $index = array_search($line['productId'], array_column($products, 'id'), true);
             if ($index === false) {
                 throw ValidationException::withMessages(['return' => 'A returned product is no longer in the catalogue.']);
@@ -132,19 +147,28 @@ final class SessionReturns
                 $losses[] = ['id' => (string) Str::uuid(), 'eventId' => $eventId.':'.$line['lineIndex'], 'returnId' => $id,
                     'productId' => $line['productId'], 'name' => $line['name'], 'option' => $line['label'], 'quantity' => $line['quantity'],
                     'baseQuantity' => $line['baseQuantity'], 'reason' => 'Other', 'notes' => "Returned goods discarded · $number · $reason",
-                    'unitCost' => $line['cost'] !== null ? intdiv($line['cost'], $line['quantity']) : null,
+                    'unitCost' => null, 'costBasis' => 'Original returned sale cost',
+                    'knownCost' => $line['knownCost'] ?? ($line['cost'] ?? 0),
                     'totalCost' => $line['cost'], 'before' => $before, 'after' => $before, 'actor' => 'Owner', 'time' => $time];
+            }
+            $line['batchAllocations'] = SessionBatches::restore($batches, $product, $line['batchAllocations'],
+                $line['baseQuantity'], $line['disposition'] === 'Restock', $id);
+            if ($line['disposition'] === 'Discard') {
+                $losses[array_key_last($losses)]['batchAllocations'] = $line['batchAllocations'];
             }
             $stockMovements[] = ['returnId' => $id, 'productId' => $line['productId'],
                 'quantity' => $line['disposition'] === 'Restock' ? $line['baseQuantity'] : 0,
                 'before' => $before, 'after' => $product['stock'], 'disposition' => $line['disposition'], 'time' => $time];
             unset($product);
         }
+        unset($line);
+        SessionBatches::assertBalanced($batches, $products);
         $record = $preview + ['id' => $id, 'eventId' => $eventId, 'number' => $number, 'shop' => config('app.name'),
             'method' => $preview['refund'] > 0 ? $method : null, 'reason' => $reason, 'time' => $time,
             'operator' => 'Owner', 'counter' => 'Counter 1', 'cashSessionId' => $cashSession['id']];
         $returns[$id] = $record;
-        $changes = ['demo.products' => $products, 'demo.returns' => $returns, 'demo.returnMovements' => $stockMovements, 'demo.losses' => $losses];
+        $changes = ['demo.products' => $products, 'demo.returns' => $returns, 'demo.returnMovements' => $stockMovements, 'demo.losses' => $losses]
+            + SessionBatches::changes($batches);
         if ($preview['debtId'] !== null) {
             $debts = SessionCredit::debts();
             $debts[$preview['debtId']]['balance'] -= $preview['creditReduction'];
@@ -157,7 +181,7 @@ final class SessionReturns
                 $number.' · '.$preview['saleNumber'], $reason, $cashSession['id'], 'refund');
             $changes['demo.cashMovements'] = $movements;
         }
-        session()->put($changes);
+        PosStore::put($changes);
 
         return $record;
     }

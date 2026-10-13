@@ -119,7 +119,7 @@ final class SessionAnalytics
                 continue;
             }
             $lossUnits += $loss['baseQuantity'];
-            $lossCost += $loss['totalCost'] ?? 0;
+            $lossCost += $loss['totalCost'] ?? ($loss['knownCost'] ?? 0);
             $uncosted += $loss['totalCost'] === null ? 1 : 0;
             $reasons[$loss['reason']] = ($reasons[$loss['reason']] ?? 0) + $loss['baseQuantity'];
         }
@@ -152,6 +152,14 @@ final class SessionAnalytics
         $revenue = array_sum($payments);
         $grossProfit = $uncostedSalesLines === 0 ? $revenue - $knownSalesCost : null;
         $operatingProfit = $grossProfit !== null && $uncosted === 0 ? $grossProfit - $expenses - $lossCost : null;
+        $supplierBalances = SessionPayables::balances();
+        $supplierPaid = 0;
+        foreach (SessionPayables::payments() as $payment) {
+            $date = Carbon::parse($payment['time'])->setTimezone('Asia/Shanghai')->toDateString();
+            if (isset($daily[$date])) {
+                $supplierPaid += $payment['amount'];
+            }
+        }
 
         return ['daily' => array_values($daily), 'payments' => $payments, 'products' => array_slice($products, 0, 10),
             'customers' => $customers, 'transactions' => $transactions, 'revenue' => $revenue,
@@ -164,6 +172,10 @@ final class SessionAnalytics
             'knownSalesCost' => $knownSalesCost, 'costedRevenue' => $costedRevenue, 'uncostedSalesLines' => $uncostedSalesLines,
             'costedProfit' => $costedRevenue - $knownSalesCost, 'grossProfit' => $grossProfit, 'operatingProfit' => $operatingProfit,
             'grossMargin' => $grossProfit !== null && $revenue > 0 ? round($grossProfit / $revenue * 100, 1) : null,
+            'supplierBalances' => $supplierBalances, 'supplierOutstanding' => array_sum(array_column($supplierBalances, 'balance')),
+            'supplierOverdue' => array_sum(array_column($supplierBalances, 'overdue')), 'supplierPaid' => $supplierPaid,
+            'unlinkedDeliveries' => SessionPayables::unlinkedDeliveries(),
+            'expiryStock' => SessionBatches::overview()['totals'],
             'from' => $start->format('M j, Y'), 'to' => $today->format('M j, Y'),
             'updated' => now('Asia/Shanghai')->format('M j, Y · g:i A')];
     }

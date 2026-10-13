@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Support\DemoCatalogue;
+use App\Support\PosStore;
 use App\Support\SessionAnalytics;
+use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionLosses;
@@ -24,6 +26,13 @@ class ProfitTest extends TestCase
         $product = DemoCatalogue::find($id);
         $product['baseCost'] = $cost;
         DemoCatalogue::save($product);
+        $state = SessionBatches::state();
+        $batchId = 'legacy-'.$id;
+        if (($state['batches'][$batchId]['source'] ?? '') === 'Legacy stock') {
+            $state['batches'][$batchId]['source'] = 'Opening stock';
+            $state['batches'][$batchId]['totalCost'] = $cost === null ? null : $cost * $product['stock'];
+            PosStore::put(SessionBatches::changes($state));
+        }
     }
 
     public function test_individual_and_package_sales_use_exact_base_unit_costs(): void
@@ -43,7 +52,7 @@ class ProfitTest extends TestCase
         $this->get('/reports')->assertOk()->assertSee('98.80')->assertSee('51.20')->assertSee('34.1%');
     }
 
-    public function test_previews_do_not_record_profit_and_completion_uses_current_cost(): void
+    public function test_previews_do_not_record_profit_and_default_cost_edits_do_not_revalue_batches(): void
     {
         $this->setCost(1, 1500);
         $draft = SessionSales::draft(['drink-one' => 1], 'Cash', '20', false);
@@ -52,8 +61,8 @@ class ProfitTest extends TestCase
         $this->assertSame(0, SessionAnalytics::summarize(7)['grossProfit']);
         $this->setCost(1, 1800);
         $sale = SessionSales::complete('current', ['drink-one' => 1], 'Cash', '20', false);
-        $this->assertSame(1800, $sale['lines'][0]['cost']);
-        $this->assertSame(200, SessionAnalytics::summarize(7)['grossProfit']);
+        $this->assertSame(1500, $sale['lines'][0]['cost']);
+        $this->assertSame(500, SessionAnalytics::summarize(7)['grossProfit']);
     }
 
     public function test_cost_edits_and_retries_preserve_original_sale_profit(): void
@@ -66,9 +75,9 @@ class ProfitTest extends TestCase
         $this->assertSame(1000, SessionAnalytics::summarize(7)['grossProfit']);
         SessionSales::complete('second', ['drink-one' => 1], 'GCash', '', true);
         $summary = SessionAnalytics::summarize(7);
-        $this->assertSame(4800, $summary['knownSalesCost']);
-        $this->assertSame(1200, $summary['grossProfit']);
-        $this->assertSame(20.0, $summary['grossMargin']);
+        $this->assertSame(4500, $summary['knownSalesCost']);
+        $this->assertSame(1500, $summary['grossProfit']);
+        $this->assertSame(25.0, $summary['grossMargin']);
         $this->assertSame(69, DemoCatalogue::find(1)['stock']);
     }
 
@@ -132,7 +141,7 @@ class ProfitTest extends TestCase
     {
         $this->setCost(1, 1500);
         SessionSales::complete('sale', ['drink-one' => 1], 'Cash', '20', false);
-        SessionLosses::record('loss', 'drink-one', 1, 'Damage', 'Broken bottle', '');
+        SessionLosses::record('loss', 'noodle-one', 1, 'Damage', 'Damaged packet with unknown cost', '');
         $summary = SessionAnalytics::summarize(7);
         $this->assertSame(500, $summary['grossProfit']);
         $this->assertSame(25.0, $summary['grossMargin']);

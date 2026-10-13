@@ -2,7 +2,7 @@
 
 ## Approved direction
 
-Selected stack: Laravel backend, Livewire interface, and MySQL central database. MySQL installation, connection configuration, and migrations are deferred until a later stage. Initial screen development can use explicit sample data without claiming database persistence. Offline checkout needs a separate client-side durable store and sync layer; Livewire handles the connected interface. Framework versions and the offline implementation will be verified before coding.
+Selected stack: Laravel backend, Livewire interface, and PostgreSQL central database. Local PostgreSQL 18.4 is installed and running on port 5432. Laravel now connects to the dedicated wynn_mart database through wynn_mart_app; all five migrations are applied, providing nine foundation tables and 30 POS/offline tables. The preview enables pdo_pgsql. The selected browser catalogue is imported into shared PostgreSQL storage; file sessions now retain interface state, not business records. Offline checkout now uses a separate cached public shell, IndexedDB sale store and authenticated sync API; Livewire handles the connected interface. Installed framework APIs, transaction rules and browser outage/recovery behavior are verified.
 
 Current screen designs are approved and may be revised later. One owner-operated shop, one active checkout counter, individual/package sales, full desktop/tablet functionality, and mobile analytics only. No staff management or RBAC in the initial release.
 
@@ -22,7 +22,7 @@ Desktop / tablet application                 Mobile analytics
                    Reporting + scheduled backups
 ```
 
-Use one responsive application interface with shared business rules. Designate one device as the active checkout. Other devices use synchronized data; dashboards show sync freshness. The active checkout can transact offline after initial setup. The mobile interface contains analytics only.
+Owner authentication and scheduled local backups with isolated recovery checks are implemented and verified. The diagram includes implemented offline storage and planned hardware adapters. Physical hardware remains deferred. Use one responsive application interface with shared business rules. Designate one device as the active checkout. Other devices use synchronized data; dashboards show sync freshness. One prepared browser can transact offline within its bounded session. The mobile interface contains analytics only.
 
 ## Application modules
 
@@ -39,24 +39,24 @@ Build these in one application/backend initially. Keep module boundaries clear w
 
 ## Data and financial integrity
 
-The central relational database is the consolidated record. The active checkout maintains a durable local store and an upload queue. Inventory is represented by traceable base-unit movements; package conversions are stored on sale lines. Historical sales preserve names, prices, quantities, discounts, costs, and payment details.
+The central relational database is now the consolidated record for connected operation. PosStore uses Laravel Query Builder with typed core fields and foreign keys, separate option/document-line tables, and JSONB historical snapshots. A shop workspace row lock is acquired before mutable validation reads; stock, debt, cash and source events commit in one transaction. Event/document uniqueness, stock constraints and one-open-cash-session enforcement protect retries and competing requests. This version serializes shop requests and reads/upserts full collections; scalability optimizations remain future work. Each connected session shares these records and uses manual refresh for changes from another device. The initial import saves a private source archive and cannot overwrite an initialized workspace. Archives are not scheduled backups. The prepared checkout commits sale/stock/receipt and upload sequence atomically in IndexedDB; ordered uploads reconcile to the database through the same shop lock. Inventory is represented by traceable base-unit movements; package conversions are stored on sale lines. Historical sales preserve names, prices, quantities, discounts, costs, and payment details.
 
-Use exact monetary values and database constraints for identifiers, barcodes, references, and quantities. A completed sale and its stock movements are committed together. Cost allocation must be selected before profit reporting is implemented. Missing costs are flagged in reports.
+Use exact monetary values and database constraints for identifiers, barcodes, references, and quantities. A completed sale and its stock movements are committed together. New sale costs use actual expiry-first batch acquisition allocations, saved as exact integer-cent cost segments. Cumulative proportional shares conserve the batch total across individual/package sales; partial returns reverse original chunks and restock retains value for resale. Losses use affected batches; optional manual estimates only value unknown units and remain labeled. Product default-cost edits do not revalue stock or receipts. Historic receipts retain their saved basis; legacy returns without original cost segments restore unknown-cost stock. Inventory/Reports expose remaining acquisition value and unknown-cost coverage; missing costs withhold affected totals. Owner login is implemented and verified, and the owner confirmed successful login. Local backups, isolated recovery checks and bounded offline checkout/synchronization are complete; practical device/network acceptance is next.
 
 ## Offline sale lifecycle
 
-1. Download catalogue/settings and establish an authenticated checkout device while online.
+1. Sign in online, open the cash session and prepare one browser with fixed catalogue/prices, sellable stock and saved credit customers. Preparation is capped at two hours, configured session lifetime and local midnight.
 2. Add products and quantities using the locally available catalogue.
 3. Confirm payment. GCash/Maya confirmation remains manual and may require internet in the separate payment app.
 4. Save the completed sale, stock movements, and outbox event in one local transaction.
 5. Generate a receipt from that saved sale. Printer errors permit reprinting without another sale.
 6. Upload queued events when connected. Each event and sale has a unique identifier; duplicate retries return the existing result.
 7. The server validates and applies each sale atomically, then acknowledges it.
-8. Retain local records until acknowledgment. Show failed/pending events visibly and provide recovery rather than silently dropping them.
+8. Retain local receipts after acknowledgment, show failed/pending events and permit private recovery exports. Finish seals new sales, checks all uploads, then releases the counter. Recovery imports are sealed and recheck original event identifiers before release.
 
-Prices downloaded later affect future sales only. Owner edits to products, prices, receiving, and stock counts require connectivity in the initial design, reducing conflicting inventory changes. Offline scope initially covers checkout, locally held carts, receipts, and checkout cash-session events; broader offline management requires additional design.
+Prices and all connected business writes pause while the offline lease is active, preserving stock and price assumptions even when the prepared browser disconnects. POS storage rejects writes outside the scoped upload service. The initial offline scope covers one saved cart, checkout and receipts. Opening/closing cash sessions, returns, expenses, loans, repayments and management remain online; multiple held carts and broader offline management require additional work. Original sale time controls expiry and reports; late uploads inside the original valid window remain accepted.
 
-Stock displayed on other devices may be stale while checkout is offline. No system can supply unsynchronized sales to remote analytics. Manual stock counts must warn about outstanding checkout transactions and be reconciled after those transactions synchronize.
+Stock displayed on other devices may be stale while checkout is offline. No system can supply unsynchronized sales to remote analytics. Manual stock counts and other mutations are blocked until those transactions synchronize and the original browser finishes. There is no lost-device force-release workflow yet.
 
 ## Hardware preparation
 
@@ -68,7 +68,13 @@ Stock displayed on other devices may be stale while checkout is offline. No syst
 
 ## Protection and recovery
 
-Owner login and device authentication remain necessary even without RBAC. Validate all write requests on the server, protect credentials, and maintain activity history. Define automatic database backups and test restoration. Cloud backup covers synchronized records only; pending offline sales need a local recovery/export strategy. Set backup frequency, retention, and acceptable data-loss/recovery windows with the owner before launch.
+Owner login now protects all shop pages and Livewire writes without RBAC. One reserved owner account is created only through a local hidden-input setup command; no public registration or default credentials exist. Session rotation, idle expiry, CSRF, generic login errors, account/IP and IP throttling, sign-out and local password recovery are verified. Recovery revokes existing device sessions on their next request. The owner confirmed successful account activation and login. Device registration/authentication and network/HTTPS deployment remain pending. Validate all write requests on the server, protect credentials, and maintain activity history.
+
+Local PostgreSQL backups use a read-only repeatable-read exported snapshot and custom-format pg_dump archive of the configured application schema, including the owner account. Saved table/row fingerprints and archive SHA-256 checksums verify recovery independently of later shop changes. Archives/metadata are outside public/signed file routes in Git-ignored storage/app/backups. A nonblocking file lock prevents overlap; metadata replacement is atomic, incomplete files are cleaned up, and stale running attempts become failed on the next operation. Retention removes only registered expired successful archives after a new backup succeeds.
+
+Settings offers manual backup, history, pause/frequency/retention controls and recovery checks. Daily/14-day defaults are active. A limited interactive Windows task checks hourly and at sign-in; it runs while this computer is on and the account is signed in. Database secrets stay in subprocess environments, and required Windows system variables are supplied explicitly for web and scheduled processes. Recovery starts a separate temporary localhost PostgreSQL instance, restores the saved archive, compares all records, then stops and removes it. It needs no administrator credentials or additional database privileges and does not overwrite the live database. The actual shop check matched all 37 tables and 17 saved records.
+
+Archives are unencrypted local copies. Off-device storage, configuration/application-key and uploaded-file recovery, a controlled production restore procedure and acceptable data-loss/recovery windows remain to be settled before launch. Pending offline sales have separate JSON recovery exports taken in one readonly IndexedDB transaction. Restore requires online owner authentication, no active local session/pending queue, consistent sequences/stock, and seals further sales while original events are rechecked. A database archive cannot contain unsynchronized records; a stale export cannot recover events absent from it. Keep the browser profile/site data and private copies until server confirmation. Storage permission may be declined. Explicit logout locks cached checkout across tabs; server authentication/CSRF is required for sync. Passwords/tokens are not persisted locally, but remote revocation is undetectable while disconnected. Only public shell/assets are cached. HTTPS/localhost and supporting browsers are required; actual Android HTTPS/network deployment remains pending.
 
 ## Implementation milestones
 
@@ -82,9 +88,8 @@ Owner login and device authentication remain necessary even without RBAC. Valida
 | F | Analytics and mobile reports | Totals reconciled to source records, missing-cost and freshness indicators |
 | G | Hardware, backup restore, owner pilot | Actual device tests and recovered data |
 
-Offline data structures are designed before checkout implementation; milestone D completes verification and synchronization behavior before live use.
+Milestone D software checks pass: 11 feature tests, including PostgreSQL retry persistence, eight Node checks and isolated browser outage/reload/recovery/sync scenarios. The full suite passes 172 tests/1664 assertions. Actual-device and owner acceptance still precede live use.
 
 ## Technology selection gates
 
-Confirm desktop/tablet OS and primary checkout device first. Then select and verify the frontend, backend, relational database, local storage, hosting, and printer approach against current official documentation. Laravel, Livewire, and MySQL are selected; installation and version verification are pending. MySQL setup is deferred. Currency/tax/receipt rules, insufficient-stock behavior, costing, and backup objectives remain open implementation decisions. The current HTML wireframe is a design artifact, not a working POS.
-
+Confirm desktop/tablet OS and primary checkout device first. Then select and verify the frontend, backend, relational database, local storage, hosting, and printer approach against current official documentation. Laravel, Livewire, and PostgreSQL are selected. Local PostgreSQL 18.4 and its running service have been verified; PHP can load pdo_pgsql. Application database foundation setup and connection verification are complete. POS tables, Query Builder storage, transactional writes and selected-browser import are implemented and covered by isolated PostgreSQL tests. Owner authentication is implemented and verified, and the owner confirmed successful login. Android/network setup, off-device disaster recovery, lost-checkout recovery and practical device acceptance remain pending. Currency/tax/receipt policies and disaster-recovery objectives remain open business decisions. Insufficient/expired stock blocking and exact batch costing are implemented. The current HTML wireframe is a design artifact, not a working POS.

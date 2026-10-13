@@ -3,6 +3,7 @@
 namespace App\Livewire;
 
 use App\Support\DemoCatalogue;
+use App\Support\SessionBatches;
 use App\Support\SessionLosses;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Str;
@@ -21,6 +22,8 @@ class Losses extends Component
 
     public string $unitCost = '';
 
+    public string $batchId = '';
+
     public string $message = '';
 
     #[Locked]
@@ -34,15 +37,16 @@ class Losses extends Component
     public function updatedOptionId(): void
     {
         $this->unitCost = '';
+        $this->batchId = '';
     }
 
     public function record(): void
     {
         $this->resetErrorBag();
-        SessionLosses::record($this->eventId, $this->optionId, $this->quantity, $this->reason, $this->notes, $this->unitCost);
+        SessionLosses::record($this->eventId, $this->optionId, $this->quantity, $this->reason, $this->notes, $this->unitCost, $this->batchId);
         $this->eventId = (string) Str::uuid();
-        $this->reset('optionId', 'quantity', 'notes', 'unitCost');
-        $this->message = 'Stock loss recorded. Available stock updated in this session.';
+        $this->reset('optionId', 'quantity', 'notes', 'unitCost', 'batchId');
+        $this->message = 'Stock loss recorded. Available stock and batch costs updated.';
     }
 
     public function render(): View
@@ -50,6 +54,7 @@ class Losses extends Component
         $option = DemoCatalogue::option($this->optionId);
 
         return view('livewire.losses', ['products' => DemoCatalogue::products(), 'losses' => array_reverse(SessionLosses::all()),
-            'reasons' => SessionLosses::REASONS, 'option' => $option]);
+            'reasons' => SessionLosses::REASONS, 'option' => $option,
+            'batches' => array_filter(SessionBatches::overview()['batches'], fn (array $batch): bool => $batch['productId'] === ($option['productId'] ?? null) && $batch['remaining'] > 0)]);
     }
 }

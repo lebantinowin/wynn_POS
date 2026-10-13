@@ -3,6 +3,8 @@
 namespace App\Livewire;
 
 use App\Support\DemoCatalogue;
+use App\Support\PosStore;
+use App\Support\SessionBatches;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
 use Livewire\Attributes\Locked;
@@ -84,6 +86,12 @@ class Products extends Component
 
     public function save(): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => $this->save());
+
+            return;
+        }
+
         $this->resetErrorBag();
         $this->name = trim($this->name);
         $this->sku = strtoupper(trim($this->sku));
@@ -177,7 +185,7 @@ class Products extends Component
         if ($this->getErrorBag()->isNotEmpty()) {
             return;
         }
-        $id = $existing['id'] ?? max(array_column(DemoCatalogue::products(), 'id')) + 1;
+        $id = $existing['id'] ?? max([0, ...array_column(DemoCatalogue::products(), 'id')]) + 1;
         $saleOptions = [];
         foreach ($this->options as $index => $option) {
             $saleOptions[] = [
@@ -185,14 +193,25 @@ class Products extends Component
                 'units' => (int) $option['units'], 'price' => self::minorUnits($option['price']), 'barcode' => $option['barcode'],
             ];
         }
-        DemoCatalogue::save(['id' => $id, 'name' => $this->name, 'sku' => $this->sku, 'category' => $this->category,
+        $product = ['id' => $id, 'name' => $this->name, 'sku' => $this->sku, 'category' => $this->category,
             'unit' => $this->unit, 'stock' => $existing['stock'] ?? (int) $this->openingStock,
             'reorder' => (int) $this->reorder, 'baseCost' => $this->baseCost === '' || $this->baseCost === null ? null : self::minorUnits((string) $this->baseCost),
             'openingExpiry' => $existing ? ($existing['openingExpiry'] ?? null) : ($this->openingExpiry ?: null),
             'openingQuantity' => $existing ? ($existing['openingQuantity'] ?? null) : (int) $this->openingStock,
-            'trackExpiry' => $this->trackExpiry, 'options' => $saleOptions]);
+            'trackExpiry' => $this->trackExpiry, 'options' => $saleOptions];
+        if ($existing) {
+            DemoCatalogue::save($product);
+        } else {
+            $batches = SessionBatches::state();
+            SessionBatches::add($batches, $product, $product['stock'], 'Opening stock', 'product-'.$id, 'Opening stock',
+                $product['openingExpiry'] ?? '', $product['baseCost'] !== null ? $product['baseCost'] * $product['stock'] : null);
+            $products = DemoCatalogue::products();
+            $products[] = $product;
+            SessionBatches::assertBalanced($batches, $products);
+            PosStore::put(['demo.products' => $products] + SessionBatches::changes($batches));
+        }
         $this->showForm = false;
-        $this->message = 'Product saved in this browser session. It is available in sample checkout.';
+        $this->message = 'Product saved. It is available in checkout.';
     }
 
     private static function minorUnits(string $price): int
@@ -216,6 +235,12 @@ class Products extends Component
 
     public function saveCount(): void
     {
+        if (PosStore::needsTransaction()) {
+            PosStore::atomic(fn () => $this->saveCount());
+
+            return;
+        }
+
         $this->countReason = trim($this->countReason);
         $this->validate(['physicalCount' => 'required|integer|min:0|max:100000000', 'countReason' => 'required|string|min:3|max:300']);
         $product = $this->countProductId === null ? null : DemoCatalogue::find($this->countProductId);
@@ -223,13 +248,27 @@ class Products extends Component
             return;
         }
         $before = $product['stock'];
+        $batches = SessionBatches::state();
+        $id = (string) Str::uuid();
+        $difference = (int) $this->physicalCount - $before;
+        $allocations = [];
+        if ($difference < 0) {
+            $allocations = SessionBatches::consume($batches, $product['id'], -$difference, 'Stock count', $id, 'physicalCount');
+        } elseif ($difference > 0) {
+            $batchId = SessionBatches::add($batches, $product, $difference, 'Stock count', $id, $this->countReason);
+            $allocations = [['batchId' => $batchId, 'quantity' => $difference, 'expiry' => '']];
+        }
         $product['stock'] = (int) $this->physicalCount;
-        DemoCatalogue::save($product);
-        DemoCatalogue::recordCount(['productId' => $product['id'], 'name' => $product['name'], 'before' => $before,
+        $products = DemoCatalogue::products();
+        $products[array_search($product['id'], array_column($products, 'id'), true)] = $product;
+        $history = PosStore::get('demo.counts', []);
+        $history[] = ['id' => $id, 'productId' => $product['id'], 'name' => $product['name'], 'before' => $before,
             'after' => $product['stock'], 'difference' => $product['stock'] - $before,
-            'reason' => $this->countReason, 'actor' => 'Owner preview', 'time' => now()->toIso8601String()]);
+            'reason' => $this->countReason, 'actor' => 'Owner', 'time' => now()->toIso8601String(), 'batchAllocations' => $allocations];
+        SessionBatches::assertBalanced($batches, $products);
+        PosStore::put(['demo.products' => $products, 'demo.counts' => $history] + SessionBatches::changes($batches));
         $this->countProductId = null;
-        $this->message = 'Physical count recorded in this browser session.';
+        $this->message = 'Physical count recorded.';
     }
 
     public function cancelCount(): void
@@ -244,7 +283,7 @@ class Products extends Component
             'products' => array_filter(DemoCatalogue::products(), fn ($p) => str_contains(strtolower($p['name'].' '.$p['sku'].' '.$p['category']), strtolower($this->search))),
             'countProduct' => $this->countProductId === null ? null : DemoCatalogue::find($this->countProductId),
             'editingProduct' => $this->editingId === null ? null : DemoCatalogue::find($this->editingId),
-            'history' => array_reverse(session()->get('demo.counts', [])),
+            'history' => array_reverse(PosStore::get('demo.counts', [])),
         ]);
     }
 }

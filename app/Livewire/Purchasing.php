@@ -40,6 +40,8 @@ class Purchasing extends Component
 
     public string $reference = '';
 
+    public string $dueDate = '';
+
     public string $message = '';
 
     public function saveSupplier(): void
@@ -47,7 +49,7 @@ class Purchasing extends Component
         SessionPurchasing::saveSupplier($this->supplierEditingId, ['name' => $this->name, 'contact' => $this->contact,
             'phone' => $this->phone, 'email' => $this->email, 'notes' => $this->supplierNotes]);
         $this->cancelSupplierEdit();
-        $this->message = 'Supplier saved in this browser session.';
+        $this->message = 'Supplier saved.';
     }
 
     public function editSupplier(string $id): void
@@ -103,12 +105,13 @@ class Purchasing extends Component
         $this->receivingOrderId = $id;
         $this->receivingEventId = (string) Str::uuid();
         $this->reference = '';
+        $this->dueDate = '';
         $this->deliveries = array_map(fn ($line) => ['quantity' => 0, 'cost' => number_format($line['cost'] / 100, 2, '.', ''), 'expiry' => ''], $order['lines']);
     }
 
     public function cancelReceiving(): void
     {
-        $this->reset('receivingOrderId', 'receivingEventId', 'deliveries', 'reference');
+        $this->reset('receivingOrderId', 'receivingEventId', 'deliveries', 'reference', 'dueDate');
         $this->resetErrorBag();
     }
 
@@ -117,9 +120,10 @@ class Purchasing extends Component
         if ($this->receivingOrderId === null) {
             return;
         }
-        SessionPurchasing::receive($this->receivingOrderId, $this->deliveries, $this->reference, $this->receivingEventId);
+        SessionPurchasing::receive($this->receivingOrderId, $this->deliveries, $this->reference, $this->receivingEventId, $this->dueDate);
         $this->cancelReceiving();
-        $this->message = 'Delivery recorded. Stock and order status updated in this session.';
+        $this->message = 'Delivery recorded. Stock updated and an unpaid supplier bill created. Record any payment below.';
+        $this->dispatch('supplier-delivery-recorded');
     }
 
     public function render(): View
