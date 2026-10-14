@@ -261,7 +261,7 @@ class BatchesTest extends TestCase
         Livewire::test(Inventory::class)->set('optionId', 'drink-one')->set('quantity', 1)->set('cost', '0')
             ->set('supplier', 'Supplier')->call('receive')->assertHasErrors('cost');
         $this->assertSame($before, SessionBatches::state());
-        $sale = SessionSales::complete('sale', ['drink-one' => 1], 'Maya', '', true);
+        $sale = SessionSales::complete('sale', ['drink-one' => 1], 'Maya', '20', true);
         SessionCash::recordMovement('withdraw', 'out', '1000', 'Remove float');
         $before = SessionBatches::state();
         $this->reject(fn () => SessionReturns::complete('refund', $sale['id'], [['quantity' => 1, 'disposition' => 'Restock']], 'Cash', true, 'Customer returned item'), 'refund');

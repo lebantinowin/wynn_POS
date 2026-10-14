@@ -3,13 +3,17 @@
 namespace Tests\Feature;
 
 use App\Livewire\Backups;
+use App\Support\CheckoutCarts;
 use App\Support\DatabaseBackups;
 use App\Support\DemoCatalogue;
+use App\Support\OfflineCheckout;
 use App\Support\PosStore;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionReturns;
 use App\Support\SessionSales;
+use App\Support\ShopPreferences;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -41,8 +45,14 @@ class BackupsTest extends TestCase
         $this->assertSame(0, Artisan::call('migrate', ['--database' => 'backup_test', '--path' => [
             'database/migrations/0001_01_01_000000_create_users_table.php',
             'database/migrations/2026_10_12_003040_create_pos_tables.php',
+            'database/migrations/2026_10_12_024957_create_offline_checkout_tables.php',
+            'database/migrations/2026_10_13_011002_create_shop_settings_table.php',
+            'database/migrations/2026_10_13_062247_create_checkout_carts_table.php',
+            'database/migrations/2026_10_14_060702_add_recovery_release_to_offline_checkouts_table.php',
         ], '--force' => true]));
         PosStore::import(['products' => DemoCatalogue::defaults()], 'backup-test');
+        $preferences = app(ShopPreferences::class);
+        $preferences->save(array_replace($preferences->all(), ['address' => 'Recovery shop address', 'footer' => 'Saved recovery footer']));
         SessionCash::open('backup-cash', '1000', '');
         SessionCredit::addCustomer('Recovery customer', '');
         $customer = array_key_first(SessionCredit::customers());
@@ -80,14 +90,14 @@ class BackupsTest extends TestCase
     public function test_settings_screen_and_default_preferences_follow_owner_workspace(): void
     {
         $this->get('/settings')->assertOk()->assertSee('Backups &amp; recovery', false)->assertSee('Back up now')->assertSee('14 days')->assertSee('No backup saved yet');
-        $this->assertSame(['enabled' => true, 'intervalHours' => 24, 'retentionDays' => 14], app(DatabaseBackups::class)->settings());
+        $this->assertSame(['enabled' => true, 'intervalHours' => 24, 'retentionDays' => 14, 'externalDirectory' => ''], app(DatabaseBackups::class)->settings());
     }
 
     public function test_preferences_persist_and_reject_unsupported_values(): void
     {
         Livewire::test(Backups::class)->set('enabled', false)->set('intervalHours', 6)->set('retentionDays', 30)
             ->call('saveSettings')->assertHasNoErrors()->assertSee('Backup preferences saved.');
-        $this->assertSame(['enabled' => false, 'intervalHours' => 6, 'retentionDays' => 30], app(DatabaseBackups::class)->settings());
+        $this->assertSame(['enabled' => false, 'intervalHours' => 6, 'retentionDays' => 30, 'externalDirectory' => ''], app(DatabaseBackups::class)->settings());
         Livewire::test(Backups::class)->set('intervalHours', 2)->set('retentionDays', 0)->call('saveSettings')->assertHasErrors(['intervalHours', 'retentionDays']);
         $this->assertSame(30, app(DatabaseBackups::class)->settings()['retentionDays']);
     }
@@ -182,6 +192,7 @@ class BackupsTest extends TestCase
     public function test_real_backup_restores_exact_historical_records_in_a_separate_server(): void
     {
         $backups = $this->database();
+        CheckoutCarts::hold((string) Str::uuid(), ['drink-one' => 1], 'Recovery cart');
         $record = $backups->create();
         $this->assertSame('Succeeded', $record['status']);
         $this->assertGreaterThan(5, $record['bytes']);
@@ -190,6 +201,8 @@ class BackupsTest extends TestCase
         $this->assertSame(1, $record['tables']['sales']['rows']);
         $this->assertSame(1, $record['tables']['sale_returns']['rows']);
         $this->assertSame(2, $record['tables']['customer_debts']['rows']);
+        $this->assertSame(1, $record['tables']['shop_settings']['rows']);
+        $this->assertSame(1, $record['tables']['checkout_carts']['rows']);
         SessionCredit::addCustomer('Added after the backup', '');
         $before = $backups->fingerprints(PosStore::connection(), $this->schema);
         $verified = $backups->verify($record['id']);
@@ -229,6 +242,47 @@ class BackupsTest extends TestCase
         $this->assertFileExists($backups->path($failed['id'].'.dump'));
         $this->assertFileExists($backups->path('unregistered.dump'));
         $this->assertSame('Pruned', collect($backups->history())->firstWhere('id', $old['id'])['status']);
+    }
+
+    public function test_real_external_copy_restores_saved_records_after_local_retention_prunes_it(): void
+    {
+        $backups = $this->database();
+        $offline = app(OfflineCheckout::class);
+        $snapshot = $offline->prepare((string) Str::uuid(), (string) Str::uuid());
+        $this->travelTo(Carbon::parse($snapshot['validUntil'])->addSecond());
+        $offline->releaseUnavailable($snapshot['id'], (string) Str::uuid(), 'Recovery fixture browser unavailable', 'RELEASE COUNTER 1', true);
+        Storage::fake('external');
+        $directory = Storage::disk('external')->path('');
+        $backups->saveExternalDirectory($directory);
+        $record = $backups->create();
+        $this->assertSame(1, $record['tables']['offline_checkouts']['rows']);
+        $this->assertSame('Succeeded', $record['externalCopy']['status']);
+        $this->assertSame($record['checksum'], hash_file('sha256', $directory.DIRECTORY_SEPARATOR.$record['externalCopy']['archive']));
+        $record['completedAt'] = now()->subDays(20)->toIso8601String();
+        File::put($backups->path('records/'.$record['id'].'.json'), json_encode($record));
+        $backups->create();
+        $this->assertSame('Pruned', collect($backups->history())->firstWhere('id', $record['id'])['status']);
+        $this->assertFileDoesNotExist($backups->path($record['id'].'.dump'));
+        $before = $backups->fingerprints(PosStore::connection(), $this->schema);
+        $verified = $backups->verifyExternal($record['id']);
+        $this->assertSame('Passed', $verified['externalCopy']['verification']);
+        $this->assertSame(count($record['tables']), $verified['externalCopy']['verifiedTables']);
+        $this->assertSame($before, $backups->fingerprints(PosStore::connection(), $this->schema));
+    }
+
+    public function test_real_backup_succeeds_when_drive_is_disconnected_and_can_be_retried(): void
+    {
+        $backups = $this->database();
+        Storage::fake('external');
+        $directory = Storage::disk('external')->path('disconnected');
+        $backups->saveExternalDirectory($directory);
+        Livewire::test(Backups::class)->call('backupNow')->assertHasNoErrors()->assertSee('Local backup saved, but the drive copy failed');
+        $record = $backups->history()[0];
+        $this->assertSame('Succeeded', $record['status']);
+        $this->assertSame('Failed', $record['externalCopy']['status']);
+        $this->assertFileExists($backups->path($record['id'].'.dump'));
+        File::ensureDirectoryExists($directory);
+        $this->assertSame('Succeeded', $backups->copyExternal($record['id'])['externalCopy']['status']);
     }
 
     public function test_automatic_backup_runs_once_when_due_and_manual_backup_can_run_immediately(): void

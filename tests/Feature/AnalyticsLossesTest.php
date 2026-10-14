@@ -69,7 +69,7 @@ class AnalyticsLossesTest extends TestCase
         SessionCredit::addCustomer('Maria', '');
         $customer = array_key_first(SessionCredit::customers());
         SessionSales::complete('cash', ['drink-one' => 1], 'Cash', '50', false);
-        SessionSales::complete('qr', ['noodle-pack' => 1], 'GCash', '', true);
+        SessionSales::complete('qr', ['noodle-pack' => 1], 'GCash', '70', true);
         SessionSales::complete('credit', ['drink-pack' => 1], 'Credit', '', false, $customer);
         $groceryDebt = array_key_first(SessionCredit::debts());
         SessionCredit::cashLoan('loan', $customer, '100', 'Cash', '', '');

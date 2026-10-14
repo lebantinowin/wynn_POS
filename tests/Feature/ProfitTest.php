@@ -73,7 +73,7 @@ class ProfitTest extends TestCase
         $retry = SessionSales::complete('first', ['drink-one' => 2], 'Cash', '40', false);
         $this->assertSame($first, $retry);
         $this->assertSame(1000, SessionAnalytics::summarize(7)['grossProfit']);
-        SessionSales::complete('second', ['drink-one' => 1], 'GCash', '', true);
+        SessionSales::complete('second', ['drink-one' => 1], 'GCash', '20', true);
         $summary = SessionAnalytics::summarize(7);
         $this->assertSame(4500, $summary['knownSalesCost']);
         $this->assertSame(1500, $summary['grossProfit']);
@@ -103,7 +103,7 @@ class ProfitTest extends TestCase
     {
         $this->setCost(1, 2500);
         $this->setCost(2, 0);
-        $sale = SessionSales::complete('loss', ['drink-one' => 1, 'noodle-one' => 1], 'Maya', '', true);
+        $sale = SessionSales::complete('loss', ['drink-one' => 1, 'noodle-one' => 1], 'Maya', '35', true);
         $this->assertSame(0, $sale['lines'][1]['cost']);
         $summary = SessionAnalytics::summarize(7);
         $this->assertSame(0, $summary['uncostedSalesLines']);

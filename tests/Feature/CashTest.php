@@ -37,7 +37,7 @@ class CashTest extends TestCase
     {
         Livewire::test(Checkout::class)->call('add', 'drink-one')->set('received', '20')->call('preview')->assertHasNoErrors()
             ->call('complete')->assertHasErrors('cashSession');
-        Livewire::test(Checkout::class)->call('add', 'drink-one')->set('method', 'GCash')->set('confirmed', true)
+        Livewire::test(Checkout::class)->call('add', 'drink-one')->set('method', 'GCash')->set('received', '20')->set('confirmed', true)
             ->call('complete')->assertHasErrors('cashSession');
         $this->assertSame(72, DemoCatalogue::find(1)['stock']);
         $this->assertEmpty(SessionSales::all());
@@ -50,7 +50,7 @@ class CashTest extends TestCase
         $cashSession = SessionCash::open('open', '500', 'Starting float');
         $customer = $this->customer();
         $sale = SessionSales::complete('cash', ['drink-one' => 1], 'Cash', '100', false);
-        SessionSales::complete('qr', ['noodle-pack' => 1], 'GCash', '', true);
+        SessionSales::complete('qr', ['noodle-pack' => 1], 'GCash', '70', true);
         SessionSales::complete('credit', ['drink-pack' => 1], 'Credit', '', false, $customer);
         SessionCredit::cashLoan('loan', $customer, '100', 'Cash', '', '');
         $loanId = array_key_last(SessionCredit::debts());

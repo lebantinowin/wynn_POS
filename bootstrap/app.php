@@ -2,6 +2,7 @@
 
 use App\Http\Middleware\OwnerAccess;
 use App\Http\Middleware\PosTransaction;
+use App\Http\Middleware\PracticeWorkspace;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -16,7 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->redirectGuestsTo(fn (): string => route('login'));
-        $middleware->web(append: [OwnerAccess::class, AuthenticateSession::class, PosTransaction::class]);
+        $middleware->web(prepend: [PracticeWorkspace::class], append: [OwnerAccess::class, AuthenticateSession::class, PosTransaction::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

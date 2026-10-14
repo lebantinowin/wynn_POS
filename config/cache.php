@@ -49,8 +49,8 @@ return [
 
         'file' => [
             'driver' => 'file',
-            'path' => storage_path('framework/cache/data'),
-            'lock_path' => storage_path('framework/cache/locks'),
+            'path' => storage_path(env('POS_PRACTICE', false) ? 'app/practice/cache/data' : 'framework/cache/data'),
+            'lock_path' => storage_path(env('POS_PRACTICE', false) ? 'app/practice/cache/locks' : 'framework/cache/locks'),
         ],
 
         'storage' => [

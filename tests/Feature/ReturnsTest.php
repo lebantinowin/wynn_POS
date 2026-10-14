@@ -145,7 +145,7 @@ class ReturnsTest extends TestCase
 
     public function test_cash_refund_of_a_digital_sale_uses_the_selected_drawer_and_original_sales_method(): void
     {
-        $sale = SessionSales::complete('sale', ['drink-one' => 1], 'GCash', '', true);
+        $sale = SessionSales::complete('sale', ['drink-one' => 1], 'GCash', '20', true);
         SessionReturns::complete('return', $sale['id'], $this->inputs($sale['id'], [1]), 'Cash', true, 'Customer requested cash refund');
         $summary = SessionCash::summary(SessionCash::active()['id']);
         $this->assertSame(98000, $summary['expected']);
@@ -157,7 +157,7 @@ class ReturnsTest extends TestCase
 
     public function test_cash_overdraft_and_stock_overflow_leave_all_return_records_unchanged(): void
     {
-        $sale = SessionSales::complete('sale', ['drink-one' => 1, 'noodle-one' => 1], 'GCash', '', true);
+        $sale = SessionSales::complete('sale', ['drink-one' => 1, 'noodle-one' => 1], 'GCash', '35', true);
         SessionCash::recordMovement('withdraw', 'out', '1000', 'Bank deposit');
         Livewire::test(Sales::class)->call('startReturn', $sale['id'])->set('returnLines.0.quantity', 1)
             ->set('refundMethod', 'Cash')->set('returnReason', 'Customer changed purchase')->set('refundConfirmed', true)->call('completeReturn')->assertHasErrors('refund');
@@ -218,7 +218,7 @@ class ReturnsTest extends TestCase
         $view = Livewire::test(Sales::class)->set('search', 'Maria Santos')->set('period', '7')->set('status', 'Partially returned')
             ->assertSee($sale['number'])->assertSee($return['number'])->assertSee('Grocery credit');
         $view->call('viewReceipt', $sale['id'])->assertSee('COPY')->assertSet('selectedReturnId', null);
-        $view->call('viewReturn', $return['id'])->assertSet('selectedId', null)->assertSee('SESSION RETURN');
+        $view->call('viewReturn', $return['id'])->assertSet('selectedId', null)->assertSee('SAVED RETURN');
         $view->set('search', now('Asia/Shanghai')->toDateString())->assertSee($sale['number'])->assertSee($return['number']);
         $view->set('status', 'Returned')->assertSee('No matching sales');
         $this->assertSame($sale, SessionSales::all()[$sale['id']]);
@@ -297,7 +297,7 @@ class ReturnsTest extends TestCase
         $this->travelTo(Carbon::parse('2026-10-01 08:00:00', 'UTC'));
         $sale = SessionSales::complete('older', ['drink-one' => 1], 'Cash', '20', false);
         $this->travelTo(Carbon::parse('2026-10-09 08:00:00', 'UTC'));
-        SessionSales::complete('today', ['noodle-one' => 2], 'GCash', '', true);
+        SessionSales::complete('today', ['noodle-one' => 2], 'GCash', '30', true);
         SessionReturns::complete('refund', $sale['id'], $this->inputs($sale['id'], [1]), 'Cash', true, 'Earlier cash sale returned');
         $summary = SessionAnalytics::summarize(7);
         $this->assertSame(1000, $summary['revenue']);

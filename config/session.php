@@ -60,7 +60,7 @@ return [
     |
     */
 
-    'files' => storage_path('framework/sessions'),
+    'files' => storage_path(env('POS_PRACTICE', false) ? 'app/practice/sessions' : 'framework/sessions'),
 
     /*
     |--------------------------------------------------------------------------

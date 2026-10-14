@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
@@ -29,7 +30,7 @@ class OfflineCheckout
     public function assertWritable(): void
     {
         if (! $this->applying && $this->active()) {
-            throw ValidationException::withMessages(['offline' => 'Counter 1 is using offline checkout. Synchronize and finish that session in its original browser before changing shop records.']);
+            throw ValidationException::withMessages(['offline' => 'Counter 1 is using offline checkout. Synchronize and finish that session in its original browser, or review Offline counter recovery in Settings before changing shop records.']);
         }
     }
 
@@ -62,7 +63,8 @@ class OfflineCheckout
             if ($until->greaterThan($midnight)) {
                 $until = $midnight;
             }
-            $snapshot = ['version' => 1, 'id' => $id, 'deviceId' => $deviceId, 'shop' => config('app.name'),
+            $profile = app(ShopPreferences::class)->receiptProfile();
+            $snapshot = ['version' => 2, 'id' => $id, 'deviceId' => $deviceId, 'shop' => $profile['shopName'], 'receiptProfile' => $profile,
                 'preparedAt' => now()->toIso8601String(), 'validUntil' => $until->toIso8601String(),
                 'cashSessionId' => $cash['id'], 'cashSessionNumber' => $cash['number'], 'products' => array_values($products),
                 'customers' => array_values(array_map(fn (array $customer): array => array_intersect_key($customer, array_flip(['id', 'name'])), SessionCredit::customers()))];
@@ -83,6 +85,8 @@ class OfflineCheckout
                 'method' => 'required|in:Cash,GCash,Maya,Credit', 'received' => 'present|nullable|string|max:30',
                 'confirmed' => 'required|boolean', 'customerId' => 'present|nullable|string|max:120',
                 'dueDate' => 'present|nullable|string|max:10', 'total' => 'required|integer|min:1|max:9007199254740991',
+                'paymentVersion' => 'sometimes|integer|in:2',
+                'discount' => 'sometimes|nullable|string|max:30', 'discountReason' => 'sometimes|nullable|string|max:200',
             ])->validate();
             foreach (['received', 'customerId', 'dueDate'] as $field) {
                 $data[$field] ??= '';
@@ -101,6 +105,9 @@ class OfflineCheckout
                 return json_decode($saved->receipt, true, flags: JSON_THROW_ON_ERROR);
             }
             if (! $lease->active || (int) $lease->next_sequence !== (int) $data['sequence']) {
+                if ($lease->recovery_release ?? null) {
+                    throw ValidationException::withMessages(['offline' => 'The owner released this unavailable checkout. New uploads are blocked. Keep this recovery copy and reconcile its unconfirmed sales manually; confirmed uploads can still be rechecked.']);
+                }
                 throw ValidationException::withMessages(['offline' => 'Upload pending sales in their original order. This session may already be finished.']);
             }
             $snapshot = json_decode($lease->snapshot, true, flags: JSON_THROW_ON_ERROR);
@@ -117,11 +124,13 @@ class OfflineCheckout
             $this->applying = true;
             $this->saleTime = $at;
             try {
-                $draft = SessionSales::draft($data['cart'], $data['method'], $data['received'], $data['confirmed'], $data['customerId'], $data['dueDate']);
+                $allowUnrecordedDigital = ($snapshot['version'] ?? 1) < 2 && ! isset($data['paymentVersion']);
+                $received = $allowUnrecordedDigital && in_array($data['method'], ['GCash', 'Maya']) ? '' : $data['received'];
+                $draft = SessionSales::draft($data['cart'], $data['method'], $received, $data['confirmed'], $data['customerId'], $data['dueDate'], $allowUnrecordedDigital, $data['discount'] ?? '', $data['discountReason'] ?? '');
                 if ($draft['total'] !== (int) $data['total']) {
                     throw ValidationException::withMessages(['offline' => 'The saved sale total does not match the prepared prices. Keep it for review.']);
                 }
-                $receipt = SessionSales::complete($data['eventId'], $data['cart'], $data['method'], $data['received'], $data['confirmed'], $data['customerId'], $data['dueDate'], $snapshot['cashSessionId']);
+                $receipt = SessionSales::complete($data['eventId'], $data['cart'], $data['method'], $received, $data['confirmed'], $data['customerId'], $data['dueDate'], $snapshot['cashSessionId'], $allowUnrecordedDigital, $data['discount'] ?? '', $data['discountReason'] ?? '');
                 $receipt['offline'] = ['leaseId' => $lease->id, 'sequence' => (int) $data['sequence'],
                     'localNumber' => 'OFF-'.strtoupper(substr($lease->id, 0, 8)).'-'.str_pad((string) $data['sequence'], 6, '0', STR_PAD_LEFT),
                     'syncedAt' => now()->toIso8601String()];
@@ -149,6 +158,62 @@ class OfflineCheckout
                 throw ValidationException::withMessages(['offline' => 'Synchronize every saved sale before finishing offline checkout.']);
             }
             PosStore::connection()->table('offline_checkouts')->where('id', $id)->update(['active' => false]);
+        });
+    }
+
+    public function recoveryAvailable(): bool
+    {
+        return PosStore::database() && PosStore::ready() && PosStore::connection()->getSchemaBuilder()->hasColumn('offline_checkouts', 'recovery_release');
+    }
+
+    public function releaseHistory(): array
+    {
+        if (! $this->recoveryAvailable()) {
+            return [];
+        }
+        $history = PosStore::connection()->table('offline_checkouts')->whereNotNull('recovery_release')->get()
+            ->map(fn (object $lease): array => json_decode($lease->recovery_release, true, flags: JSON_THROW_ON_ERROR) + ['leaseId' => $lease->id])->all();
+        usort($history, fn (array $a, array $b): int => strcmp($b['releasedAt'], $a['releasedAt']));
+
+        return $history;
+    }
+
+    public function releaseUnavailable(string $id, string $eventId, string $reason, string $confirmation, bool $acknowledged): array
+    {
+        return PosStore::atomic(function () use ($id, $eventId, $reason, $confirmation, $acknowledged): array {
+            if ((int) auth()->id() !== User::OWNER_ID || ! $this->recoveryAvailable()) {
+                throw ValidationException::withMessages(['offline' => 'Sign in as the owner in the initialized shop to recover Counter 1.']);
+            }
+            $reason = trim($reason);
+            Validator::make(compact('id', 'eventId', 'reason', 'confirmation', 'acknowledged'), [
+                'id' => 'required|uuid', 'eventId' => 'required|uuid', 'reason' => 'required|string|min:3|max:200',
+                'confirmation' => 'required|in:RELEASE COUNTER 1', 'acknowledged' => 'accepted',
+            ])->validate();
+            $lease = PosStore::connection()->table('offline_checkouts')->where('id', $id)->first();
+            if (! $lease) {
+                throw ValidationException::withMessages(['offline' => 'This checkout could not be found. Refresh Settings before continuing.']);
+            }
+            if ($lease->recovery_release) {
+                $saved = json_decode($lease->recovery_release, true, flags: JSON_THROW_ON_ERROR);
+                if ($saved['eventId'] !== $eventId || $saved['reason'] !== $reason || $saved['ownerId'] !== User::OWNER_ID) {
+                    throw ValidationException::withMessages(['offline' => 'This checkout was already released. Its recorded reason cannot be replaced.']);
+                }
+
+                return $saved;
+            }
+            if (! $lease->active) {
+                throw ValidationException::withMessages(['offline' => 'This checkout already finished. Refresh Settings to review the current counter.']);
+            }
+            $snapshot = json_decode($lease->snapshot, true, flags: JSON_THROW_ON_ERROR);
+            if (now()->lessThan(Carbon::parse($snapshot['validUntil']))) {
+                throw ValidationException::withMessages(['offline' => 'Wait until this checkout’s offline selling period expires. The original browser may still be recording sales.']);
+            }
+            $release = ['eventId' => $eventId, 'ownerId' => User::OWNER_ID, 'reason' => $reason, 'releasedAt' => now()->toIso8601String(),
+                'validUntil' => $snapshot['validUntil'], 'cashSessionId' => $snapshot['cashSessionId'],
+                'confirmedSales' => (int) $lease->next_sequence - 1, 'unconfirmedSales' => 'Unknown', 'acknowledged' => true];
+            PosStore::connection()->table('offline_checkouts')->where('id', $id)->update(['active' => false, 'recovery_release' => json_encode($release, JSON_THROW_ON_ERROR)]);
+
+            return $release;
         });
     }
 

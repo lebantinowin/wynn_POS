@@ -1,12 +1,38 @@
 export const money = (value) => {
-    if (!/^\d{1,12}(\.\d{1,2})?$/.test(value)) throw new Error('Enter a cash amount with at most two decimal places.');
+    if (!/^\d{1,12}(\.\d{1,2})?$/.test(value)) throw new Error('Enter an amount received with at most two decimal places.');
     const [whole, fraction = ''] = value.split('.');
     const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
     if (!Number.isSafeInteger(cents)) throw new Error('The cash amount is too large.');
     return cents;
 };
 
-export function draftSale(state, at) {
+export function discountedLines(lines, discount = '', reason = '') {
+    const subtotal = lines.reduce((sum,line)=>sum+line.total,0);
+    if (!Number.isSafeInteger(subtotal) || subtotal < 0) throw new Error('The sale total exceeds the supported amount.');
+    if (typeof discount !== 'string' || typeof reason !== 'string') throw new Error('Enter a valid discount and reason.');
+    let cents = 0;
+    try { cents = discount === '' ? 0 : money(discount); }
+    catch { throw new Error('Enter a discount in pesos with at most two decimal places.'); }
+    if (cents > 0 && cents >= subtotal) throw new Error('Discount must be less than the subtotal. The final total must be at least ₱0.01.');
+    reason = reason.trim();
+    if ([...reason].length > 200 || (cents > 0 && [...reason].length < 3)) throw new Error('Enter a discount reason between 3 and 200 characters.');
+    let cumulative = 0, allocated = 0;
+    const priced = lines.map(line=>({...line}));
+    const allocationOrder = lines.map((line,index)=>index).sort((left,right)=>{
+        if (lines[left].id == null || lines[right].id == null) return left-right;
+        return lines[left].id < lines[right].id ? -1 : lines[left].id > lines[right].id ? 1 : 0;
+    });
+    for (const index of allocationOrder) {
+        const line = lines[index];
+        cumulative += line.total;
+        const share = cents === 0 ? 0 : Number(BigInt(cents)*BigInt(cumulative)/BigInt(subtotal));
+        const lineDiscount = share-allocated; allocated = share;
+        priced[index] = {...line,subtotal:line.total,discount:lineDiscount,total:line.total-lineDiscount};
+    }
+    return {lines:priced,subtotal,discount:cents,discountReason:cents > 0 ? reason : '',total:subtotal-cents};
+}
+
+export function draftSale(state, at, allowUnrecordedDigital = false) {
     if (!Number.isFinite(at)) throw new Error('The saved sale time is invalid.');
     if (!state.snapshot || state.sealed) throw new Error('Prepare checkout online, or finish the current session before starting another.');
     if (at < Date.parse(state.snapshot.preparedAt) || at >= Date.parse(state.snapshot.validUntil)) throw new Error('This offline session has expired. Synchronize and finish it online, then prepare again.');
@@ -26,20 +52,29 @@ export function draftSale(state, at) {
     for (const [id, required] of Object.entries(requirements)) {
         if (required > state.remaining[id]) throw new Error('The cart exceeds the remaining sellable stock.');
     }
-    const total = lines.reduce((sum, line) => sum + line.total, 0);
+    const pricing = discountedLines(lines, draft.discount ?? '', draft.discountReason ?? '');
+    const total = pricing.total;
     if (!Number.isSafeInteger(total) || total < 1) throw new Error('The sale total is invalid.');
     if (!['Cash', 'GCash', 'Maya', 'Credit'].includes(draft.method)) throw new Error('Choose a payment method.');
     let cashReceived = null;
+    let paymentReceived = null;
     if (draft.method === 'Cash') {
         cashReceived = money(draft.received);
+        paymentReceived = cashReceived;
         if (cashReceived < total) throw new Error('Cash received must cover the total.');
     } else if (draft.method === 'Credit') {
         if (!state.snapshot.customers.some(c => c.id === draft.customerId)) throw new Error('Choose a saved credit customer.');
         const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(at).map(p=>[p.type,p.value]));
         const today = parts.year+'-'+parts.month+'-'+parts.day;
         if (draft.dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(draft.dueDate) || draft.dueDate < today || Number.isNaN(Date.parse(draft.dueDate)) || new Date(draft.dueDate+'T00:00:00Z').toISOString().slice(0,10) !== draft.dueDate)) throw new Error('Choose a valid due date on or after the sale date.');
-    } else if (!draft.confirmed) throw new Error('Verify the payment in the payment app first.');
-    return {lines, requirements, total, method: draft.method, cashReceived, change: cashReceived === null ? 0 : cashReceived - total,
+    } else {
+        if (!draft.confirmed) throw new Error('Verify the payment in the payment app first.');
+        if (!(allowUnrecordedDigital && draft.received === '')) {
+            paymentReceived = money(draft.received);
+            if (paymentReceived !== total) throw new Error(draft.method+' amount received must match the sale total. Resolve any payment difference in the app before completing the sale.');
+        }
+    }
+    return {...pricing, requirements, total, receiptProfile: structuredClone(state.snapshot.receiptProfile || {currency:'PHP'}), method: draft.method, cashReceived, paymentReceived, change: cashReceived === null ? 0 : cashReceived - total,
         customer: state.snapshot.customers.find(c => c.id === draft.customerId)?.name ?? null, dueDate: draft.dueDate};
 }
 
@@ -71,7 +106,9 @@ export function validateRecovery(copy) {
     if (current.length !== saved.nextSequence - 1) invalid();
     for (const [index,record] of current.entries()) {
         if (record.payload.sequence !== index + 1 || record.payload.deviceId !== saved.deviceId) invalid();
-        const draft = draftSale({snapshot,remaining,draft:record.payload,sealed:false},Date.parse(record.payload.occurredAt));
+        const legacyDigital = (snapshot.version || 1) < 2 && record.payload.paymentVersion !== 2 && ['GCash','Maya'].includes(record.payload.method);
+        const recoveredDraft = legacyDigital ? {...record.payload,received:''} : record.payload;
+        const draft = draftSale({snapshot,remaining,draft:recoveredDraft,sealed:false},Date.parse(record.payload.occurredAt),legacyDigital);
         if (draft.total !== record.payload.total || draft.total !== record.localReceipt.total) invalid();
         for (const [id,required] of Object.entries(draft.requirements)) remaining[id] -= required;
     }
@@ -147,7 +184,8 @@ export class OfflineStore {
             if (sequence > 1000000) throw new Error('Finish this session before recording more sales.');
             const payload = {leaseId: state.snapshot.id, deviceId: state.deviceId, eventId, sequence, occurredAt: new Date(at).toISOString(),
                 cart: {...state.draft.cart}, method: state.draft.method, received: state.draft.received, confirmed: state.draft.confirmed,
-                customerId: state.draft.customerId, dueDate: state.draft.dueDate, total: receipt.total};
+                customerId: state.draft.customerId, dueDate: state.draft.dueDate, total: receipt.total, paymentVersion: 2,
+                discount: state.draft.discount ?? '', discountReason: state.draft.discountReason ?? ''};
             const localReceipt = {...receipt, shop: state.snapshot.shop, number: 'OFF-'+state.snapshot.id.slice(0,8).toUpperCase()+'-'+String(sequence).padStart(6,'0'), time: payload.occurredAt};
             const record = {eventId, payload, localReceipt, status: 'Pending', error: ''};
             sales.add(record);

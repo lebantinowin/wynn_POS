@@ -16,7 +16,7 @@ class DatabaseBackups
 {
     public function settings(): array
     {
-        $defaults = ['enabled' => true, 'intervalHours' => 24, 'retentionDays' => 14];
+        $defaults = ['enabled' => true, 'intervalHours' => 24, 'retentionDays' => 14, 'externalDirectory' => ''];
         $path = $this->path('settings.json');
 
         return is_file($path) ? array_replace($defaults, $this->read($path)) : $defaults;
@@ -27,7 +27,13 @@ class DatabaseBackups
         if (! in_array($intervalHours, [1, 6, 24], true) || ! in_array($retentionDays, [7, 14, 30, 90], true)) {
             throw new RuntimeException('Choose a supported backup frequency and retention period.');
         }
-        $this->locked(fn () => $this->write($this->path('settings.json'), ['enabled' => $enabled, 'intervalHours' => $intervalHours, 'retentionDays' => $retentionDays]));
+        $this->locked(fn () => $this->write($this->path('settings.json'), array_replace($this->settings(), ['enabled' => $enabled, 'intervalHours' => $intervalHours, 'retentionDays' => $retentionDays])));
+    }
+
+    public function saveExternalDirectory(string $directory): void
+    {
+        $directory = app(ExternalBackupCopies::class)->validateDirectory($directory);
+        $this->locked(fn () => $this->write($this->path('settings.json'), array_replace($this->settings(), ['externalDirectory' => $directory])));
     }
 
     public function history(): array
@@ -157,6 +163,7 @@ class DatabaseBackups
                 DB::purge('backup_snapshot');
             }
 
+            $record = $this->copyExternalRecord($record);
             try {
                 $this->prune($id, $settings['retentionDays']);
             } catch (Throwable) {
@@ -200,6 +207,77 @@ class DatabaseBackups
                 $this->save($record);
 
                 throw new RuntimeException($record['verificationError']);
+            }
+        });
+    }
+
+    private function record(string $id): array
+    {
+        if (! Str::isUuid($id)) {
+            throw new RuntimeException('Choose a saved backup.');
+        }
+
+        return $this->read($this->path('records/'.$id.'.json'));
+    }
+
+    private function copyExternalRecord(array $record): array
+    {
+        $directory = $this->settings()['externalDirectory'];
+        if ($directory === '') {
+            return $record;
+        }
+        $attemptedAt = now()->toIso8601String();
+        $record['externalCopy'] = ['status' => 'Running', 'directory' => $directory, 'attemptedAt' => $attemptedAt];
+        $this->save($record);
+        try {
+            $copy = app(ExternalBackupCopies::class)->copy($record, $directory);
+            $record['externalCopy'] = $copy + ['attemptedAt' => $attemptedAt];
+        } catch (Throwable $exception) {
+            $record['externalCopy'] = ['status' => 'Failed', 'directory' => $directory, 'attemptedAt' => $attemptedAt,
+                'error' => $exception instanceof RuntimeException ? $exception->getMessage() : 'The drive copy failed. Check connection, free space and write access. The local backup is safe.'];
+        }
+        $this->save($record);
+
+        return $record;
+    }
+
+    public function copyExternal(string $id): array
+    {
+        return $this->locked(function () use ($id): array {
+            $record = $this->record($id);
+            if ($this->settings()['externalDirectory'] === '') {
+                throw new RuntimeException('Choose a USB or external-drive folder in Settings first.');
+            }
+            $record = $this->copyExternalRecord($record);
+            if ($record['externalCopy']['status'] !== 'Succeeded') {
+                throw new RuntimeException($record['externalCopy']['error']);
+            }
+
+            return $record;
+        });
+    }
+
+    public function verifyExternal(string $id): array
+    {
+        return $this->locked(function () use ($id): array {
+            $record = $this->record($id);
+            if (($record['externalCopy']['status'] ?? '') !== 'Succeeded') {
+                throw new RuntimeException('Copy this backup to the drive before checking its recovery.');
+            }
+            $record['externalCopy']['verification'] = 'Running';
+            $this->save($record);
+            try {
+                $record['externalCopy'] = app(ExternalBackupCopies::class)->verify($record);
+                unset($record['externalCopy']['verificationError']);
+                $this->save($record);
+
+                return $record;
+            } catch (Throwable $exception) {
+                $record['externalCopy']['verification'] = 'Failed';
+                $record['externalCopy']['verificationError'] = $exception instanceof RuntimeException ? $exception->getMessage() : 'The drive recovery check failed. Check the archive, metadata and PostgreSQL tools.';
+                $this->save($record);
+
+                throw new RuntimeException($record['externalCopy']['verificationError']);
             }
         });
     }
@@ -249,6 +327,10 @@ class DatabaseBackups
 
     public function path(string $relative = ''): string
     {
+        if (config('pos.practice')) {
+            throw new RuntimeException('Main shop backups are unavailable in the practice shop.');
+        }
+
         return Storage::disk('backups')->path($relative);
     }
 
@@ -315,6 +397,15 @@ class DatabaseBackups
             } elseif (($record['verification'] ?? '') === 'Running') {
                 $record['verification'] = 'Failed';
                 $record['verificationError'] = 'The previous recovery check was interrupted.';
+                $this->save($record);
+            }
+            if (($record['externalCopy']['status'] ?? '') === 'Running') {
+                $record['externalCopy']['status'] = 'Failed';
+                $record['externalCopy']['error'] = 'The previous drive copy was interrupted. Retry to check or complete both files. The local backup is safe.';
+                $this->save($record);
+            } elseif (($record['externalCopy']['verification'] ?? '') === 'Running') {
+                $record['externalCopy']['verification'] = 'Failed';
+                $record['externalCopy']['verificationError'] = 'The previous drive recovery check was interrupted.';
                 $this->save($record);
             }
         }

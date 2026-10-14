@@ -2,11 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Livewire\Checkout;
 use App\Livewire\Inventory;
 use App\Livewire\Products;
 use App\Models\User;
+use App\Support\CheckoutCarts;
 use App\Support\DemoCatalogue;
+use App\Support\OfflineCheckout;
 use App\Support\PosStore;
+use App\Support\ReportExports;
+use App\Support\SessionAnalytics;
 use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
@@ -15,11 +20,14 @@ use App\Support\SessionPayables;
 use App\Support\SessionPurchasing;
 use App\Support\SessionReturns;
 use App\Support\SessionSales;
+use App\Support\ShopPreferences;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
@@ -42,7 +50,13 @@ class PostgresPersistenceTest extends TestCase
         config(['database.connections.pos_test' => $connection, 'database.connections.pos_competing' => $connection,
             'pos.connection' => 'pos_test', 'pos.storage' => 'database']);
         DB::connection('pos_test')->statement('CREATE SCHEMA "'.$this->schema.'"');
-        $this->assertSame(0, Artisan::call('migrate', ['--database' => 'pos_test', '--path' => 'database/migrations/2026_10_12_003040_create_pos_tables.php', '--force' => true]));
+        $this->assertSame(0, Artisan::call('migrate', ['--database' => 'pos_test', '--path' => [
+            'database/migrations/2026_10_12_003040_create_pos_tables.php',
+            'database/migrations/2026_10_12_024957_create_offline_checkout_tables.php',
+            'database/migrations/2026_10_13_011002_create_shop_settings_table.php',
+            'database/migrations/2026_10_13_062247_create_checkout_carts_table.php',
+            'database/migrations/2026_10_14_060702_add_recovery_release_to_offline_checkouts_table.php',
+        ], '--force' => true]));
     }
 
     protected function tearDown(): void
@@ -59,6 +73,235 @@ class PostgresPersistenceTest extends TestCase
     private function initialize(): void
     {
         PosStore::import(['products' => DemoCatalogue::defaults()], 'test-browser');
+    }
+
+    public function test_unavailable_checkout_release_is_persistent_and_stale_requests_preserve_new_hold(): void
+    {
+        $this->initialize();
+        SessionCash::open('recovery-open', '1000', '');
+        $offline = app(OfflineCheckout::class);
+        $old = $offline->prepare((string) Str::uuid(), (string) Str::uuid());
+        $this->travelTo(Carbon::parse($old['validUntil'])->addSecond());
+        $eventId = (string) Str::uuid();
+        $release = $offline->releaseUnavailable($old['id'], $eventId, 'Browser unavailable', 'RELEASE COUNTER 1', true);
+        $new = $offline->prepare((string) Str::uuid(), (string) Str::uuid());
+        $stock = DemoCatalogue::products();
+        $cash = SessionCash::all();
+        DB::purge('pos_test');
+        $this->assertEquals($release, $offline->releaseUnavailable($old['id'], $eventId, 'Browser unavailable', 'RELEASE COUNTER 1', true));
+        $this->assertSame($new['id'], $offline->active()->id);
+        $this->assertSame('Unknown', $offline->releaseHistory()[0]['unconfirmedSales']);
+        $this->assertSame($stock, DemoCatalogue::products());
+        $this->assertSame($cash, SessionCash::all());
+        $this->assertSame([], SessionSales::all());
+    }
+
+    public function test_discounted_receipt_costs_and_partial_refunds_survive_postgresql_reload(): void
+    {
+        $this->initialize();
+        $batches = SessionBatches::state();
+        foreach ($batches['batches'] as &$batch) {
+            $batch['totalCost'] = $batch['initialQuantity'] * 1000;
+        }
+        unset($batch);
+        PosStore::put(SessionBatches::changes($batches));
+        SessionCash::open('discount-open', '1000', '');
+        $checkout = Livewire::test(Checkout::class)->call('setQuantity', 'drink-one', 3)
+            ->set(['discount' => '1.01', 'discountReason' => 'Owner promotion', 'received' => '100'])
+            ->call('complete')->assertHasNoErrors();
+        $sale = $checkout->get('receipt');
+        session()->flush();
+        DB::purge('pos_test');
+        $this->assertSame(5899, SessionSales::all()[$sale['id']]['total']);
+        $this->assertSame(101, SessionSales::all()[$sale['id']]['discount']);
+        $this->assertSame('Owner promotion', SessionSales::all()[$sale['id']]['discountReason']);
+        $this->assertSame(3000, SessionSales::all()[$sale['id']]['lines'][0]['cost']);
+        $this->assertSame(2899, SessionAnalytics::summarize(7)['grossProfit']);
+        foreach ([1966, 1966, 1967] as $index => $expectedRefund) {
+            $return = SessionReturns::complete('discount-return-'.$index, $sale['id'], [['quantity' => 1, 'disposition' => 'Restock']], 'Cash', true, 'Discounted item returned');
+            $this->assertSame($expectedRefund, $return['refund']);
+            DB::purge('pos_test');
+        }
+        $this->assertSame(5899, array_sum(array_column(SessionReturns::all(), 'refund')));
+        $this->assertSame(0, SessionAnalytics::summarize(7)['revenue']);
+        $this->assertSame(0, SessionAnalytics::summarize(7)['netDiscounts']);
+        $this->assertSame(72, DemoCatalogue::find(1)['stock']);
+        $this->assertEquals($sale, SessionSales::all()[$sale['id']]);
+    }
+
+    public function test_held_carts_persist_across_browser_sessions_and_resume_with_current_prices(): void
+    {
+        $this->initialize();
+        $checkout = Livewire::test(Checkout::class)->call('add', 'drink-pack')->set('holdLabel', 'Waiting customer');
+        $id = $checkout->get('saleEventId');
+        $checkout->call('holdCart')->assertHasNoErrors()->assertSet('cart', []);
+        session()->flush();
+        DB::purge('pos_test');
+        $this->assertSame(['drink-pack' => 1], CheckoutCarts::held()[$id]['cart']);
+        $this->assertSame(72, DemoCatalogue::find(1)['stock']);
+        $this->assertEmpty(SessionSales::all());
+        $product = DemoCatalogue::find(1);
+        $product['options'][1]['price'] = 12000;
+        DemoCatalogue::save($product);
+        Livewire::test(Checkout::class)->call('resumeCart', $id)->assertHasNoErrors()->assertSet('cart.drink-pack', 1)
+            ->assertSee('Prices or package sizes changed')->assertSet('confirmed', false);
+        $this->assertEmpty(CheckoutCarts::held());
+        $this->assertSame('Resumed', PosStore::connection()->table('checkout_carts')->where('event_id', $id)->value('status'));
+    }
+
+    public function test_exports_freeze_database_snapshot_and_remain_readable_during_offline_checkout(): void
+    {
+        $this->initialize();
+        SessionCash::open('report-open', '1000', 'Test float');
+        $first = SessionSales::complete('report-first', ['drink-one' => 1], 'Cash', '20', false);
+        $response = $this->get('/reports/export/transactions?days=7')->assertOk();
+        $second = SessionSales::complete('report-second', ['drink-one' => 1], 'Cash', '20', false);
+        $content = $response->streamedContent();
+        $this->assertStringContainsString($first['number'], $content);
+        $this->assertStringNotContainsString($second['number'], $content);
+        app(OfflineCheckout::class)->prepare((string) Str::uuid(), (string) Str::uuid());
+        $stock = DemoCatalogue::products();
+        foreach (ReportExports::TYPES as $type => $label) {
+            $this->get('/reports/print/'.$type)->assertOk()->assertSee('Counter 1 has an active offline session.');
+            $csv = $this->get('/reports/export/'.$type)->assertOk()->streamedContent();
+            $this->assertStringContainsString('This report may be incomplete', $csv);
+        }
+        $this->assertSame($stock, DemoCatalogue::products());
+        $this->assertCount(2, SessionSales::all());
+        $this->assertNotNull(app(OfflineCheckout::class)->active());
+    }
+
+    public function test_manual_barcode_shop_day_reconciles_stock_cash_debts_costs_and_reports(): void
+    {
+        $products = DemoCatalogue::defaults();
+        foreach ($products as &$product) {
+            $product['stock'] = 0;
+        }
+        unset($product);
+        PosStore::import(['products' => $products], 'acceptance-day');
+        SessionPurchasing::saveSupplier(null, ['name' => 'Acceptance supplier', 'contact' => '', 'phone' => '', 'email' => '', 'notes' => '']);
+        SessionPurchasing::createOrder(array_key_first(SessionPurchasing::suppliers()), '', [['optionId' => 'drink-case', 'quantity' => 2, 'cost' => '240']]);
+        SessionPurchasing::receive(array_key_first(SessionPurchasing::orders()), [['quantity' => 2, 'cost' => '240', 'expiry' => now('Asia/Shanghai')->addDays(10)->toDateString()]], 'Acceptance invoice', 'acceptance-delivery');
+        $invoiceId = array_key_first(SessionPayables::invoices());
+        $this->assertSame(48, DemoCatalogue::find(1)['stock']);
+        $this->assertSame(48000, SessionPayables::invoices()[$invoiceId]['balance']);
+        $drawer = SessionCash::open('acceptance-open', '1000', 'Test opening float');
+
+        $checkout = Livewire::test(Checkout::class)
+            ->set('search', ' DEMO-001 ')->call('scan')
+            ->set('search', 'DEMO-001')->call('scan')
+            ->set('search', 'DEMO-006')->call('scan')
+            ->assertSet('cart.drink-one', 2)->assertSet('cart.drink-pack', 1)
+            ->set('received', '200')->call('preview')->assertHasNoErrors();
+        $this->assertSame(48, DemoCatalogue::find(1)['stock']);
+        $this->assertCount(0, SessionSales::all());
+        $saleEventId = $checkout->get('saleEventId');
+        $checkout->call('complete')->assertHasNoErrors()->assertSet('cart', []);
+        $cashSale = $checkout->get('receipt');
+        $this->assertSame(15000, $cashSale['total']);
+        $this->assertSame(5000, $cashSale['change']);
+        $this->assertSame(8000, array_sum(array_column($cashSale['lines'], 'cost')));
+
+        $digitalCheckout = Livewire::test(Checkout::class)->call('add', 'drink-pack')->set('method', 'GCash')
+            ->set('received', '110')->set('confirmed', true)->call('complete')->assertHasNoErrors();
+        $digitalSale = $digitalCheckout->get('receipt');
+        SessionCredit::addCustomer('Acceptance customer', '');
+        $customerId = array_key_first(SessionCredit::customers());
+        $creditCheckout = Livewire::test(Checkout::class)->call('add', 'drink-pack')->set('method', 'Credit')
+            ->set('customerId', $customerId)->call('complete')->assertHasNoErrors();
+        $creditSale = $creditCheckout->get('receipt');
+        $groceryDebtId = array_key_first(SessionCredit::debts());
+        SessionCredit::repay('acceptance-grocery-payment', $groceryDebtId, '40', 'Cash', 'Partial grocery payment');
+        SessionCredit::cashLoan('acceptance-loan', $customerId, '50', 'Cash', '', 'Test loan principal');
+        $loanId = array_key_last(SessionCredit::debts());
+        SessionCredit::repay('acceptance-loan-payment', $loanId, '10', 'Cash', 'Partial loan payment');
+
+        $creditReturn = SessionReturns::complete('acceptance-credit-return', $creditSale['id'], [['quantity' => 1, 'disposition' => 'Restock']], 'Cash', true, 'Unopened credit purchase returned');
+        $this->assertSame(7000, $creditReturn['creditReduction']);
+        $this->assertSame(4000, $creditReturn['refund']);
+        $cashReturnLines = array_map(fn (array $line): array => ['quantity' => $line['id'] === 'drink-one' ? 1 : 0, 'disposition' => 'Restock'], $cashSale['lines']);
+        SessionReturns::complete('acceptance-cash-return', $cashSale['id'], $cashReturnLines, 'Cash', true, 'Unopened individual item returned');
+        SessionLosses::record('acceptance-consumed', 'drink-one', 1, 'Unpaid consumption', 'Consumed without paying', '');
+        SessionCash::expense('acceptance-expense', '15', 'Supplies', 'Cash', 'Test receipt paper');
+        SessionPayables::pay('acceptance-supplier-payment', $invoiceId, '100', 'Cash', true, '', 'Partial invoice payment');
+
+        $this->assertSame(34, DemoCatalogue::find(1)['stock']);
+        $this->assertSame(0, SessionCredit::debts()[$groceryDebtId]['balance']);
+        $this->assertSame(4000, SessionCredit::debts()[$loanId]['balance']);
+        $this->assertSame(38000, SessionPayables::invoices()[$invoiceId]['balance']);
+        $this->assertSame(97500, SessionCash::summary($drawer['id'])['expected']);
+        $closed = SessionCash::close($drawer['id'], 'acceptance-close', '970', 'Test drawer shortage of 5.00');
+        $this->assertSame(-500, $closed['difference']);
+
+        session()->flush();
+        DB::purge('pos_test');
+        $this->assertSame(11000, SessionSales::all()[$digitalSale['id']]['paymentReceived']);
+        $this->assertNull(SessionSales::all()[$digitalSale['id']]['cashReceived']);
+        $this->assertEquals($cashSale, SessionSales::complete($saleEventId, [], 'Cash', '', false));
+        $this->assertEquals($closed, SessionCash::close($drawer['id'], 'acceptance-close', '0', 'Retry'));
+        $summary = SessionAnalytics::summarize(7);
+        foreach (['transactions' => 3, 'grossSales' => 37000, 'returnValue' => 13000, 'refunds' => 6000,
+            'revenue' => 24000, 'collections' => 25000, 'knownSalesCost' => 13000, 'grossProfit' => 11000,
+            'lossUnits' => 1, 'lossCost' => 1000, 'expenses' => 1500, 'operatingProfit' => 8500,
+            'outstanding' => 4000, 'cashLent' => 5000, 'supplierOutstanding' => 38000, 'supplierPaid' => 10000,
+            'cashShortages' => 500, 'cashSurpluses' => 0] as $key => $expected) {
+            $this->assertSame($expected, $summary[$key], $key);
+        }
+        $this->assertSame(34000, $summary['expiryStock']['knownCost']);
+        $this->assertSame(0, $summary['expiryStock']['unknownCostUnits']);
+        $this->assertSame(24000, array_sum(array_column($summary['daily'], 'sales')));
+        $this->assertSame(25000, array_sum(array_column($summary['daily'], 'collections')));
+        $this->assertSame(['Cash' => 13000, 'GCash' => 11000, 'Maya' => 0, 'Credit' => 0], $summary['payments']);
+        $this->assertSame(13, $summary['products'][0]['units']);
+        SessionBatches::assertBalanced(SessionBatches::state(), DemoCatalogue::products());
+        $this->assertSame(3, PosStore::connection()->table('sales')->count());
+        $this->assertSame(2, PosStore::connection()->table('sale_returns')->count());
+        $this->get('/reports')->assertOk()->assertSee('240.00')->assertSee('250.00')->assertSee('85.00');
+    }
+
+    public function test_shop_profile_and_receipt_header_survive_postgresql_reconnect_and_edits(): void
+    {
+        $this->initialize();
+        $preferences = app(ShopPreferences::class);
+        $preferences->save(array_replace($preferences->all(), ['shopName' => 'PG shop', 'address' => 'Saved address', 'footer' => 'Saved footer']));
+        SessionCash::open('profile-drawer', '100', '');
+        $sale = SessionSales::complete('profile-sale', ['drink-one' => 1], 'Cash', '20', false);
+        $preferences->save(array_replace($preferences->all(), ['address' => 'Changed address']));
+        DB::purge('pos_test');
+        app()->forgetScopedInstances();
+        $this->assertSame('Changed address', app(ShopPreferences::class)->all()['address']);
+        $this->assertEquals($sale, SessionSales::all()[$sale['id']]);
+        $this->assertSame('Saved address', $sale['receiptProfile']['address']);
+        $this->assertSame('PHP', $sale['receiptProfile']['currency']);
+        $this->assertSame('Unconfirmed', $sale['receiptProfile']['taxStatus']);
+    }
+
+    public function test_invalid_manual_checkout_and_stale_drawer_cannot_change_postgresql_records(): void
+    {
+        $this->initialize();
+        $drawer = SessionCash::open('acceptance-open', '100', '');
+        $checkout = Livewire::test(Checkout::class)->set('search', 'UNKNOWN-CODE')->call('scan')
+            ->assertHasErrors('search')->assertSet('cart', [])
+            ->set('search', 'DEMO-006')->call('scan')->set('received', '1')->call('complete')->assertHasErrors('received');
+        $checkout->set('method', 'Maya')->call('complete')->assertHasErrors('confirmed')
+            ->call('setQuantity', 'drink-pack', 13)->set('received', '1430')->set('confirmed', true)->call('complete')->assertHasErrors('cart');
+        $this->assertSame(72, DemoCatalogue::find(1)['stock']);
+        $this->assertSame(10000, SessionCash::summary($drawer['id'])['expected']);
+        $this->assertSame(0, PosStore::connection()->table('sales')->count());
+        $this->assertSame(0, PosStore::connection()->table('cash_movements')->count());
+
+        $checkout->call('setQuantity', 'drink-pack', 1)->set('method', 'Cash')->set('received', '200');
+        SessionCash::close($drawer['id'], 'acceptance-close', '100', '');
+        $newDrawer = SessionCash::open('acceptance-new-open', '250', '');
+        $checkout->call('complete')->assertHasErrors('cashSession');
+        $this->assertSame(25000, SessionCash::summary($newDrawer['id'])['expected']);
+        $this->assertSame(72, DemoCatalogue::find(1)['stock']);
+        $this->assertCount(0, SessionSales::all());
+        Livewire::test(Checkout::class)->set('search', 'DEMO-006')->call('scan')->set('received', '200')
+            ->call('complete')->assertHasNoErrors();
+        $this->assertSame(66, DemoCatalogue::find(1)['stock']);
+        $this->assertSame(36000, SessionCash::summary($newDrawer['id'])['expected']);
+        $this->assertCount(1, SessionSales::all());
     }
 
     public function test_owner_login_protects_shared_postgresql_records_across_sessions(): void
@@ -289,9 +532,9 @@ class PostgresPersistenceTest extends TestCase
         });
         $competitor->transaction(fn () => $this->assertNotNull($competitor->table('pos_workspace')->where('id', 1)->lockForUpdate()->first()));
         SessionCash::open('open', '0', '');
-        SessionSales::complete('one', ['drink-case' => 3], 'GCash', '', true);
+        SessionSales::complete('one', ['drink-case' => 3], 'GCash', '1260', true);
         try {
-            SessionSales::complete('two', ['drink-one' => 1], 'GCash', '', true);
+            SessionSales::complete('two', ['drink-one' => 1], 'GCash', '20', true);
             $this->fail('A stale second checkout must not oversell.');
         } catch (ValidationException $exception) {
             $this->assertArrayHasKey('cart', $exception->errors());

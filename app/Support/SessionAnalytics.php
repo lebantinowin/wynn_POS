@@ -23,6 +23,8 @@ final class SessionAnalytics
         $costedRevenue = 0;
         $uncostedSalesLines = 0;
         $grossSales = 0;
+        $salesBeforeDiscount = 0;
+        $discounts = 0;
         foreach (SessionSales::all() as $sale) {
             $date = Carbon::parse($sale['time'])->setTimezone('Asia/Shanghai')->toDateString();
             if (! isset($daily[$date])) {
@@ -30,6 +32,8 @@ final class SessionAnalytics
             }
             $transactions++;
             $grossSales += $sale['total'];
+            $salesBeforeDiscount += $sale['subtotal'] ?? $sale['total'];
+            $discounts += $sale['discount'] ?? 0;
             $daily[$date]['sales'] += $sale['total'];
             $payments[$sale['method']] += $sale['total'];
             if ($sale['method'] !== 'Credit') {
@@ -54,6 +58,7 @@ final class SessionAnalytics
         $returnValue = 0;
         $refunds = 0;
         $returnCount = 0;
+        $returnedDiscounts = 0;
         foreach (SessionReturns::all() as $return) {
             $date = Carbon::parse($return['time'])->setTimezone('Asia/Shanghai')->toDateString();
             if (! isset($daily[$date])) {
@@ -61,6 +66,7 @@ final class SessionAnalytics
             }
             $returnCount++;
             $returnValue += $return['total'];
+            $returnedDiscounts += $return['discount'] ?? 0;
             $refunds += $return['refund'];
             $daily[$date]['sales'] -= $return['total'];
             $daily[$date]['collections'] -= $return['refund'];
@@ -166,6 +172,8 @@ final class SessionAnalytics
             'average' => $transactions ? (int) round($grossSales / $transactions) : 0,
             'immediate' => $immediate, 'repaid' => $repaid, 'collections' => $immediate + $repaid - $refunds,
             'grossSales' => $grossSales, 'returnValue' => $returnValue, 'refunds' => $refunds, 'returnCount' => $returnCount,
+            'salesBeforeDiscount' => $salesBeforeDiscount, 'discounts' => $discounts,
+            'returnedDiscounts' => $returnedDiscounts, 'netDiscounts' => $discounts - $returnedDiscounts,
             'outstanding' => $outstanding, 'overdue' => $overdue, 'cashLent' => $cashLent, 'lowStock' => $lowStock,
             'lossUnits' => $lossUnits, 'lossCost' => $lossCost, 'uncosted' => $uncosted, 'reasons' => $reasons,
             'expenses' => $expenses, 'expenseCategories' => $expenseCategories, 'cashShortages' => $cashShortages, 'cashSurpluses' => $cashSurpluses,

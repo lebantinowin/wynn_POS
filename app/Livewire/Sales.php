@@ -132,7 +132,11 @@ class Sales extends Component
         $sales = [];
         foreach (SessionSales::all() as $id => $sale) {
             $totals = SessionReturns::saleTotals($id);
-            $status = $totals['total'] === 0 ? 'Completed' : ($totals['total'] === $sale['total'] ? 'Returned' : 'Partially returned');
+            $fullyReturned = true;
+            foreach ($sale['lines'] as $lineIndex => $line) {
+                $fullyReturned = $fullyReturned && ($totals['quantities'][$lineIndex] ?? 0) === $line['quantity'];
+            }
+            $status = array_sum($totals['quantities']) === 0 ? 'Completed' : ($fullyReturned ? 'Returned' : 'Partially returned');
             $text = $sale['number'].' '.$sale['time'].' '.Carbon::parse($sale['time'])->setTimezone('Asia/Shanghai')->toDateString().' '.($sale['customer'] ?? '').' '.implode(' ', array_column($sale['lines'], 'name'));
             if (($this->method === '' || $sale['method'] === $this->method) && ($this->status === '' || $this->status === $status)
                 && $this->matchesPeriod($sale['time']) && str_contains(strtolower($text), strtolower($this->search))) {

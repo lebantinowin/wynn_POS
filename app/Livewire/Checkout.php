@@ -2,13 +2,16 @@
 
 namespace App\Livewire;
 
+use App\Support\CheckoutCarts;
 use App\Support\DemoCatalogue;
+use App\Support\SaleDiscount;
 use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionSales;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
 
@@ -21,6 +24,14 @@ class Checkout extends Component
     public string $method = 'Cash';
 
     public string $received = '';
+
+    public string $opening = '';
+
+    public string $holdLabel = '';
+
+    public string $discount = '';
+
+    public string $discountReason = '';
 
     public string $customerId = '';
 
@@ -37,26 +48,54 @@ class Checkout extends Component
     #[Locked]
     public ?string $cashSessionId = null;
 
+    #[Locked]
+    public string $openEventId = '';
+
     public string $message = '';
 
     public function mount(): void
     {
         $this->saleEventId = (string) Str::uuid();
+        $this->openEventId = (string) Str::uuid();
         $this->cashSessionId = SessionCash::active()['id'] ?? null;
     }
 
+    public function openCashSession(): void
+    {
+        $this->resetErrorBag();
+        $cashSession = SessionCash::open($this->openEventId, $this->opening, '');
+        SessionCash::requireOpen($cashSession['id']);
+        $this->cashSessionId = $cashSession['id'];
+        $this->openEventId = (string) Str::uuid();
+        $this->reset('opening');
+        $this->message = $cashSession['number'].' opened. Your cart is ready to continue.';
+    }
+
     public function updatedMethod(): void
+    {
+        $this->received = '';
+        $this->confirmed = false;
+        $this->receipt = null;
+    }
+
+    public function updatingReceived(): void
     {
         $this->confirmed = false;
         $this->receipt = null;
     }
 
-    public function updatedReceived(): void
+    public function updatedConfirmed(): void
     {
         $this->receipt = null;
     }
 
-    public function updatedConfirmed(): void
+    public function updatingDiscount(): void
+    {
+        $this->confirmed = false;
+        $this->receipt = null;
+    }
+
+    public function updatedDiscountReason(): void
     {
         $this->receipt = null;
     }
@@ -136,15 +175,55 @@ class Checkout extends Component
     {
         $this->resetErrorBag();
         $this->receipt = null;
-        $this->receipt = SessionSales::draft($this->cart, $this->method, $this->received, $this->confirmed, $this->customerId, $this->dueDate);
+        $this->receipt = SessionSales::draft($this->cart, $this->method, $this->received, $this->confirmed, $this->customerId, $this->dueDate, false, $this->discount, $this->discountReason);
+    }
+
+    public function holdCart(): void
+    {
+        $this->resetErrorBag();
+        CheckoutCarts::hold($this->saleEventId, $this->cart, $this->holdLabel, $this->discount, $this->discountReason);
+        $this->reset('cart', 'search', 'method', 'received', 'confirmed', 'customerId', 'dueDate', 'receipt', 'holdLabel', 'discount', 'discountReason');
+        $this->saleEventId = (string) Str::uuid();
+        $this->message = 'Cart saved on hold. You can start another cart or leave checkout.';
+    }
+
+    public function resumeCart(string $id): void
+    {
+        $this->resetErrorBag();
+        if ($this->cart !== []) {
+            $this->addError('heldCart', 'Hold or empty your current cart before resuming another.');
+
+            return;
+        }
+        $record = CheckoutCarts::resume($id);
+        $this->reset('search', 'method', 'received', 'confirmed', 'customerId', 'dueDate', 'receipt', 'holdLabel');
+        $this->cart = $record['cart'];
+        $this->discount = $record['discountInput'] ?? '';
+        $this->discountReason = $record['discountReason'] ?? '';
+        $this->saleEventId = (string) Str::uuid();
+        $this->cashSessionId = SessionCash::active()['id'] ?? null;
+        $this->message = 'Cart resumed. Check current stock and prices, then enter payment details again.';
+        if ($record['pricesChanged']) {
+            $this->message .= ' Prices or package sizes changed since this cart was held.';
+        }
+        if ($record['shortStock']) {
+            $this->message .= ' Some items exceed current sellable stock. Reduce their quantities before completing the sale.';
+        }
+    }
+
+    public function discardHeldCart(string $id): void
+    {
+        $this->resetErrorBag();
+        CheckoutCarts::discard($id);
+        $this->message = 'Held cart discarded. Stock and sales are unchanged.';
     }
 
     public function complete(): void
     {
         $this->resetErrorBag();
         $this->receipt = null;
-        $sale = SessionSales::complete($this->saleEventId, $this->cart, $this->method, $this->received, $this->confirmed, $this->customerId, $this->dueDate, $this->cashSessionId);
-        $this->reset('cart', 'search', 'received', 'confirmed', 'customerId', 'dueDate');
+        $sale = SessionSales::complete($this->saleEventId, $this->cart, $this->method, $this->received, $this->confirmed, $this->customerId, $this->dueDate, $this->cashSessionId, false, $this->discount, $this->discountReason);
+        $this->reset('cart', 'search', 'received', 'confirmed', 'customerId', 'dueDate', 'discount', 'discountReason');
         $this->saleEventId = (string) Str::uuid();
         $this->receipt = $sale;
         $this->message = "Sale {$sale['number']} completed. Stock and batch costs updated.";
@@ -154,8 +233,18 @@ class Checkout extends Component
     {
         $products = array_filter(DemoCatalogue::products(), fn ($p) => $this->search === '' || str_contains(strtolower($p['name'].' '.$p['sku'].' '.implode(' ', array_column($p['options'], 'barcode'))), strtolower($this->search)));
         $lines = $this->lines();
+        $subtotal = array_sum(array_column($lines, 'total'));
+        $pricing = ['lines' => $lines, 'subtotal' => $subtotal, 'discount' => 0, 'total' => $subtotal];
+        $discountError = '';
+        try {
+            $pricing = SaleDiscount::apply($lines, $this->discount, $this->discountReason);
+        } catch (ValidationException $exception) {
+            $discountError = collect($exception->errors())->flatten()->first();
+        }
 
-        return view('livewire.checkout', ['products' => $products, 'lines' => $lines, 'total' => array_sum(array_column($lines, 'total')),
-            'customers' => SessionCredit::customers(), 'cashSession' => SessionCash::active(), 'batchStock' => SessionBatches::overview()['products']]);
+        return view('livewire.checkout', ['products' => $products, 'lines' => $pricing['lines'], 'total' => $pricing['total'],
+            'subtotal' => $subtotal, 'discountAmount' => $pricing['discount'], 'discountError' => $discountError,
+            'customers' => SessionCredit::customers(), 'cashSession' => SessionCash::active(), 'batchStock' => SessionBatches::overview()['products'],
+            'heldCarts' => CheckoutCarts::held(), 'canHoldCart' => CheckoutCarts::available()]);
     }
 }

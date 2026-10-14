@@ -65,6 +65,9 @@ final class SessionReturns
                 continue;
             }
             $alreadyReturned = $line['quantity'] - $line['remaining'];
+            $paidTotal = $line['total'] ?? $line['price'] * $line['quantity'];
+            $returnTotal = BatchCost::portion($paidTotal, $line['quantity'], $alreadyReturned + $quantity)
+                - BatchCost::portion($paidTotal, $line['quantity'], $alreadyReturned);
             $allocations = SessionBatches::returnAllocations($line, $alreadyReturned * $line['units'], $line['units'] * $quantity);
             if (($line['costMethod'] ?? '') === 'batch-v1' && array_sum(array_column($allocations, 'quantity')) !== $line['units'] * $quantity) {
                 throw ValidationException::withMessages(['return' => 'The saved cost allocation is missing. Review the original receipt before returning stock.']);
@@ -76,7 +79,8 @@ final class SessionReturns
                     : null];
             $lines[] = ['lineIndex' => $index, 'productId' => $line['productId'], 'name' => $line['name'],
                 'label' => $line['label'], 'units' => $line['units'], 'quantity' => $quantity, 'baseQuantity' => $line['units'] * $quantity,
-                'price' => $line['price'], 'total' => $line['price'] * $quantity,
+                'price' => $line['price'], 'subtotal' => $line['price'] * $quantity,
+                'discount' => $line['price'] * $quantity - $returnTotal, 'total' => $returnTotal,
                 'costMethod' => $line['costMethod'] ?? 'legacy', 'batchAllocations' => $allocations,
                 'disposition' => $inputs[$index]['disposition']] + $cost;
         }
@@ -102,6 +106,7 @@ final class SessionReturns
 
         return ['saleId' => $saleId, 'saleNumber' => $sale['number'], 'saleMethod' => $sale['method'],
             'customer' => $sale['customer'] ?? null, 'lines' => $lines, 'total' => $total,
+            'subtotal' => array_sum(array_column($lines, 'subtotal')), 'discount' => array_sum(array_column($lines, 'discount')),
             'debtId' => $debtId, 'creditReduction' => $creditReduction, 'refund' => $total - $creditReduction];
     }
 
@@ -120,6 +125,7 @@ final class SessionReturns
         $reason = trim($reason);
         Validator::make(compact('method', 'reason'), ['method' => 'required|in:Cash,GCash,Maya', 'reason' => 'required|string|min:3|max:500'])->validate();
         $preview = self::preview($saleId, $inputs);
+        $sale = SessionSales::all()[$saleId];
         $cashSession = SessionCash::requireOpen($cashSessionId);
         if ($preview['refund'] > 0 && ! $confirmed) {
             throw ValidationException::withMessages(['refundConfirmed' => 'Confirm that the refund has been handed or sent to the customer.']);
@@ -163,7 +169,8 @@ final class SessionReturns
         }
         unset($line);
         SessionBatches::assertBalanced($batches, $products);
-        $record = $preview + ['id' => $id, 'eventId' => $eventId, 'number' => $number, 'shop' => config('app.name'),
+        $record = $preview + ['id' => $id, 'eventId' => $eventId, 'number' => $number, 'shop' => $sale['shop'],
+            'receiptProfile' => $sale['receiptProfile'] ?? ['currency' => 'PHP'],
             'method' => $preview['refund'] > 0 ? $method : null, 'reason' => $reason, 'time' => $time,
             'operator' => 'Owner', 'counter' => 'Counter 1', 'cashSessionId' => $cashSession['id']];
         $returns[$id] = $record;

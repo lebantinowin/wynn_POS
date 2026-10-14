@@ -219,6 +219,6 @@ class OwnerAuthenticationTest extends TestCase
 
     public function test_owner_settings_shows_account_and_recovery(): void
     {
-        $this->actingAs($this->owner())->get('/settings')->assertOk()->assertSee('Owner account')->assertSee('owner@example.test')->assertSee('setup-owner.ps1 -Reset');
+        $this->actingAs($this->owner())->get('/settings')->assertOk()->assertSee('Owner account')->assertSee('owner@example.test')->assertSee(base_path('setup-owner.ps1'))->assertSee('-Reset');
     }
 }

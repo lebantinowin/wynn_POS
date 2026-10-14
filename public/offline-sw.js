@@ -1,4 +1,4 @@
-const CACHE = 'wynn-offline-shell-v4';
+const CACHE = 'wynn-offline-shell-v8';
 const ASSETS = ['/offline-checkout.html', '/js/offline-store.js', '/js/offline-checkout.js', '/css/grocery.css', '/fonts/InterVariable.woff2', '/images/product-placeholder.svg'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS))));
 self.addEventListener('activate', event => event.waitUntil(Promise.all([self.clients.claim(), caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('wynn-offline-shell-') && key !== CACHE).map(key => caches.delete(key))))])));

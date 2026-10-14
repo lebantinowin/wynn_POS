@@ -25,6 +25,7 @@ class OfflineCheckoutTest extends TestCase
     private const MIGRATIONS = [
         'database/migrations/2026_10_12_003040_create_pos_tables.php',
         'database/migrations/2026_10_12_024957_create_offline_checkout_tables.php',
+        'database/migrations/2026_10_14_060702_add_recovery_release_to_offline_checkouts_table.php',
     ];
 
     protected function setUp(): void
@@ -69,6 +70,29 @@ class OfflineCheckoutTest extends TestCase
         } catch (ValidationException $exception) {
             $this->assertNotEmpty($exception->errors());
         }
+    }
+
+    public function test_discounted_offline_sale_syncs_exact_paid_total_and_rejects_changed_payload(): void
+    {
+        $snapshot = $this->prepared();
+        $event = $this->event($snapshot);
+        $event['discount'] = '1.01';
+        $event['discountReason'] = 'Owner promotion';
+        $event['paymentVersion'] = 2;
+        $this->postJson('/offline/sync', $event)->assertUnprocessable();
+        $this->assertEmpty(SessionSales::all());
+        $this->assertSame(72, DemoCatalogue::find(1)['stock']);
+        $event['total'] = 14899;
+        $sale = $this->postJson('/offline/sync', $event)->assertOk()->json();
+        $this->assertSame(15000, $sale['subtotal']);
+        $this->assertSame(101, $sale['discount']);
+        $this->assertSame(14899, $sale['total']);
+        $this->assertSame(5101, $sale['change']);
+        $this->assertEquals($sale, $this->postJson('/offline/sync', $event)->assertOk()->json());
+        $event['discount'] = '1.00';
+        $this->postJson('/offline/sync', $event)->assertUnprocessable();
+        $this->assertCount(1, SessionSales::all());
+        $this->assertSame(114899, SessionCash::summary($snapshot['cashSessionId'])['expected']);
     }
 
     public function test_guest_requests_cannot_prepare_upload_or_release_checkout(): void
@@ -220,9 +244,45 @@ class OfflineCheckoutTest extends TestCase
         $event['received'] = '';
         $this->postJson('/offline/sync', $event)->assertUnprocessable();
         $event['confirmed'] = true;
-        $this->postJson('/offline/sync', $event)->assertOk();
+        $this->postJson('/offline/sync', $event)->assertUnprocessable()->assertJsonValidationErrors('received');
+        foreach (['149.99', '150.01', '150.001'] as $amount) {
+            $event['received'] = $amount;
+            $this->postJson('/offline/sync', $event)->assertUnprocessable()->assertJsonValidationErrors('received');
+            $this->assertCount(1, SessionSales::all());
+            $this->assertCount(0, SessionCash::movements());
+        }
+        $event['received'] = '150.00';
+        $sale = $this->postJson('/offline/sync', $event)->assertOk()->json();
+        $this->assertSame(15000, $sale['paymentReceived']);
+        $this->assertNull($sale['cashReceived']);
+        $this->assertEquals($sale, $this->postJson('/offline/sync', $event)->assertOk()->json());
         $this->assertSame(15000, SessionCash::summary($snapshot['cashSessionId'])['methods']['GCash']['in']);
         $this->assertSame(100000, SessionCash::summary($snapshot['cashSessionId'])['expected']);
+    }
+
+    public function test_old_offline_digital_queue_can_sync_without_inventing_a_received_amount(): void
+    {
+        $snapshot = $this->prepared();
+        $snapshot['version'] = 1;
+        PosStore::connection()->table('offline_checkouts')->where('id', $snapshot['id'])
+            ->update(['snapshot' => json_encode($snapshot, JSON_THROW_ON_ERROR)]);
+        $event = $this->event($snapshot);
+        $event['method'] = 'Maya';
+        $event['received'] = '200';
+        $event['confirmed'] = true;
+        $sale = $this->postJson('/offline/sync', $event)->assertOk()->json();
+        $this->assertNull($sale['paymentReceived']);
+        $this->assertNull($sale['cashReceived']);
+        $this->assertEquals($sale, $this->postJson('/offline/sync', $event)->assertOk()->json());
+        $this->assertCount(1, SessionSales::all());
+        $this->assertSame(15000, SessionCash::summary($snapshot['cashSessionId'])['methods']['Maya']['in']);
+        $event = $this->event($snapshot, 2);
+        $event['method'] = 'Maya';
+        $event['confirmed'] = true;
+        $event['paymentVersion'] = 2;
+        $this->postJson('/offline/sync', $event)->assertUnprocessable()->assertJsonValidationErrors('received');
+        $event['received'] = '150.00';
+        $this->postJson('/offline/sync', $event)->assertOk()->assertJsonPath('paymentReceived', 15000);
     }
 
     public function test_postgresql_offline_events_survive_connection_reload_and_retry(): void

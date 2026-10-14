@@ -3,9 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Wynn's Mart · Owner sign in</title>
+    <title>{{ config('pos.practice') ? 'Practice · ' : '' }}Wynn's Mart · Owner sign in</title>
     <link rel="preload" href="{{ asset('fonts/InterVariable.woff2') }}" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=6">
+    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=8">
 </head>
 <body class="auth-page">
     <main class="auth-layout">
@@ -16,7 +16,8 @@
             <p class="auth-owner-note">One shop. One owner workspace.</p>
         </section>
         <section class="auth-card" aria-labelledby="login-heading">
-            <span class="section-kicker">OWNER ACCESS</span>
+            <span class="section-kicker">{{ config('pos.practice') ? 'PRACTICE OWNER ACCESS' : 'OWNER ACCESS' }}</span>
+            @if(config('pos.practice'))<p class="notice">Practice shop · Sample records only. Sign in with the separate practice account created in the launcher.</p>@endif
             <h2 id="login-heading">{{ $ownerConfigured ? 'Welcome back' : 'Welcome to Wynn’s Mart' }}</h2>
             <p class="muted">{{ $ownerConfigured ? 'Sign in to continue to your shop.' : 'Set up your owner account on this computer to get started.' }}</p>
             @if($ownerConfigured)
@@ -28,9 +29,9 @@
                     @error('password')<p class="error auth-error" id="password-error" role="alert">{{ $message }}</p>@enderror
                     <button class="primary" type="submit">Sign in</button>
                 </form>
-                <details class="auth-help"><summary>Forgot your password?</summary><p>On the shop computer, run <code>.\setup-owner.ps1 -Reset</code> in the project’s PowerShell terminal. Enter your new password privately, then sign in again on each device.</p></details>
+                <details class="auth-help"><summary>Forgot your password?</summary><p>On this computer, run <code>&amp; '{{ base_path(config('pos.practice') ? 'run-practice.ps1' : 'setup-owner.ps1') }}' {{ config('pos.practice') ? '-ResetOwner' : '-Reset' }}</code> in PowerShell. {{ config('pos.practice') ? 'Stop the practice server first. This resets only the practice login.' : 'Enter your new password privately, then sign in again on each device.' }}</p></details>
             @else
-                <div class="auth-setup"><strong>First-time setup</strong><p>In the project’s PowerShell terminal, run:</p><code>.\setup-owner.ps1</code><p>Enter your name, email and a password at the hidden prompt. Then refresh this page to sign in.</p><a class="button" href="{{ route('login') }}">Refresh sign-in page</a></div>
+                <div class="auth-setup"><strong>First-time setup</strong><p>In PowerShell on this computer, run:</p><code>&amp; '{{ base_path(config('pos.practice') ? 'run-practice.ps1' : 'setup-owner.ps1') }}'</code><p>Enter your name, email and a password at the hidden prompt. Then refresh this page to sign in.</p><a class="button" href="{{ route('login') }}">Refresh sign-in page</a></div>
             @endif
             <p class="auth-session-note">Use the same owner account on your desktop and tablet. Mobile gives you access to analytics.</p>
         </section>

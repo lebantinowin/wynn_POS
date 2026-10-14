@@ -42,7 +42,7 @@ class CreditTest extends TestCase
         $id = $this->customer();
         $checkout = Livewire::test(Checkout::class)->call('add', 'drink-pack')->set('method', 'Credit')
             ->set('customerId', $id)->set('dueDate', now('Asia/Shanghai')->addDay()->toDateString())
-            ->call('preview')->assertHasNoErrors()->assertSee('Amount owed: 110.00');
+            ->call('preview')->assertHasNoErrors()->assertSee('Amount owed: ₱110.00');
         $this->assertEmpty(SessionCredit::debts());
         $this->assertSame(72, DemoCatalogue::find(1)['stock']);
         $checkout->call('complete')->assertHasNoErrors()->assertSet('cart', []);

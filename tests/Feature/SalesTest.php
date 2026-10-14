@@ -57,10 +57,38 @@ class SalesTest extends TestCase
             ->call('complete')->assertHasErrors('received')
             ->set('received', '20.001')->call('complete')->assertHasErrors('received')
             ->set('method', 'Maya')->call('complete')->assertHasErrors('confirmed')
-            ->set('confirmed', true)->call('complete')->assertHasNoErrors()->assertSet('receipt.method', 'Maya');
+            ->set('received', '20')->set('confirmed', true)->call('complete')->assertHasNoErrors()->assertSet('receipt.method', 'Maya');
         $sale = array_values(SessionSales::all())[0];
         $this->assertTrue($sale['paymentConfirmed']);
         $this->assertNull($sale['cashReceived']);
+        $this->assertSame(2000, $sale['paymentReceived']);
+    }
+
+    public function test_digital_received_amount_is_required_exact_and_saved_without_affecting_cash(): void
+    {
+        foreach (['GCash', 'Maya'] as $method) {
+            $checkout = Livewire::test(Checkout::class)->call('add', 'drink-one')->set('method', $method);
+            $before = [DemoCatalogue::products(), SessionSales::all(), SessionCash::movements()];
+            foreach (['', '0', '19.99', '20.01', '-20', '20.001', '1e2', 'Infinity'] as $amount) {
+                $checkout->set('received', $amount)->set('confirmed', true)->call('complete')->assertHasErrors('received');
+                $this->assertSame($before, [DemoCatalogue::products(), SessionSales::all(), SessionCash::movements()]);
+            }
+            $checkout->set('received', '20.00')->set('confirmed', true)->call('complete')->assertHasNoErrors();
+            $sale = $checkout->get('receipt');
+            $this->assertSame(2000, $sale['paymentReceived']);
+            $this->assertNull($sale['cashReceived']);
+            $this->assertSame(0, $sale['change']);
+            $this->assertSame(100000, SessionCash::summary($sale['cashSessionId'])['expected']);
+            $this->assertSame(2000, SessionCash::summary($sale['cashSessionId'])['methods'][$method]['in']);
+            Livewire::test(Sales::class)->call('viewReceipt', $sale['id'])->assertSee($method.' amount received')
+                ->assertSee('Received')->assertSee('20.00');
+            $this->assertSame($sale, SessionSales::complete($sale['eventId'], [], $method, '', false));
+            $sales = SessionSales::all();
+            unset($sales[$sale['id']]['paymentReceived']);
+            session()->put('demo.sales', $sales);
+            Livewire::test(Sales::class)->call('viewReceipt', $sale['id'])->assertSee('Not recorded');
+            $this->assertSame($sales, SessionSales::all());
+        }
     }
 
     public function test_preview_leaves_stock_unchanged_and_history_preserves_original_details(): void
@@ -82,7 +110,7 @@ class SalesTest extends TestCase
     public function test_receipt_history_filters_by_payment_and_number(): void
     {
         SessionSales::complete('cash-sale', ['drink-one' => 1], 'Cash', '20', false);
-        SessionSales::complete('qr-sale', ['drink-one' => 1], 'GCash', '', true);
+        SessionSales::complete('qr-sale', ['drink-one' => 1], 'GCash', '20', true);
         Livewire::test(Sales::class)->set('method', 'GCash')->assertSee('WM-000002')->assertDontSee('WM-000001');
         Livewire::test(Sales::class)->set('search', 'WM-000001')->assertSee('WM-000001')->assertDontSee('WM-000002');
     }

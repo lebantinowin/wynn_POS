@@ -1,7 +1,7 @@
-import {OfflineStore} from './offline-store.js';
+import {OfflineStore,discountedLines} from './offline-store.js';
 
 const $ = id => document.getElementById(id);
-const amount = value => (value / 100).toFixed(2);
+const amount = value => '₱'+(value / 100).toFixed(2);
 const node = (tag, text = '', className = '') => { const element = document.createElement(tag); element.textContent = text; if (className) element.className = className; return element; };
 const button = (text, action) => { const element = node('button', text); element.type = 'button'; element.addEventListener('click', () => run(action)); return element; };
 let store, state, busy = false, online = false, csrf = '', signedIn = false, currentReceipt = null;
@@ -41,7 +41,7 @@ function toggleButtons() {
     if (store && !busy) {
         $('prepare').disabled = Boolean(state?.snapshot);
         $('finish').disabled = !state?.snapshot;
-        $('complete').disabled = !state?.snapshot || !Object.keys(state?.draft?.cart || {}).length || state?.sealed || Date.now() + (state?.clockOffset || 0) >= Date.parse(state?.snapshot?.validUntil) || Boolean(localStorage.getItem('wynn-offline-signed-out'));
+        $('complete').disabled = !state?.snapshot || !Object.keys(state?.draft?.cart || {}).length || state?.sealed || !$('discount-error').hidden || Date.now() + (state?.clockOffset || 0) >= Date.parse(state?.snapshot?.validUntil) || Boolean(localStorage.getItem('wynn-offline-signed-out'));
     }
 }
 async function render() {
@@ -91,34 +91,51 @@ function renderCart() {
     const draft = state.draft || {cart:{},method:'Cash',received:'',confirmed:false,customerId:'',dueDate:''};
     $('cart').replaceChildren(); $('cart').className = Object.keys(draft.cart).length ? '' : 'empty';
     let total = 0;
+    const grossLines = Object.entries(draft.cart).flatMap(([id,quantity])=>{
+        const option = state.snapshot?.products.flatMap(product=>product.options).find(option=>option.id === id);
+        return option ? [{id,total:option.price*quantity}] : [];
+    });
+    let pricing, discountError = '';
+    try { pricing = discountedLines(grossLines,draft.discount ?? '',draft.discountReason ?? ''); }
+    catch (error) { discountError = error.message; }
     for (const [id,quantity] of Object.entries(draft.cart)) {
         const product = state.snapshot?.products.find(p=>p.options.some(o=>o.id === id)), option = product?.options.find(o=>o.id === id);
         if (!option) continue;
         const line = node('div','','cart-line'), info = node('div'); info.append(node('strong',product.name),node('p',option.label+' · '+option.units*quantity+' base units'));
         const input = document.createElement('input'); input.type = 'number'; input.min = 1; input.max = 9999; input.value = quantity; input.setAttribute('aria-label','Quantity for '+product.name+' '+option.label);
         input.addEventListener('change',()=>run(async()=>{ const value=Number(input.value); if (!Number.isInteger(value) || value < 1 || value > 9999) throw new Error('Use a whole quantity from 1 to 9999.'); await store.edit(d=>{d.cart[id]=value;d.confirmed=false;}); }));
-        line.append(info,input,node('strong',amount(option.price*quantity)),button('Remove',()=>store.edit(d=>{delete d.cart[id];d.confirmed=false;}))); $('cart').append(line); total += option.price*quantity;
+        line.append(info,input,node('strong',amount(pricing?.lines.find(line=>line.id === id)?.total ?? option.price*quantity)),button('Remove',()=>store.edit(d=>{delete d.cart[id];d.confirmed=false;}))); $('cart').append(line); total += option.price*quantity;
     }
     if (!$('cart').children.length) $('cart').append(node('p','Your cart is empty. Add an individual item or package.'));
-    $('total').textContent = amount(total);
-    for (const [id,value] of [['method',draft.method],['received',draft.received],['due-date',draft.dueDate]]) { if (document.activeElement !== $(id) && !editingFields.has(id)) $(id).value = value; }
+    $('subtotal').textContent = amount(total);
+    $('total').textContent = discountError ? 'Review discount' : amount(pricing.total);
+    $('discount-error').hidden = !discountError; $('discount-error').textContent = discountError;
+    for (const [id,value] of [['method',draft.method],['received',draft.received],['due-date',draft.dueDate],['discount',draft.discount ?? ''],['discount-reason',draft.discountReason ?? '']]) { if (document.activeElement !== $(id) && !editingFields.has(id)) $(id).value = value; }
     $('confirmed').checked = draft.confirmed;
     const customers = state.snapshot?.customers || [];
     $('customer').replaceChildren(); const placeholder = node('option','Select saved customer'); placeholder.value = ''; $('customer').append(placeholder);
     for (const customer of customers) { const option=node('option',customer.name);option.value=customer.id;$('customer').append(option); }
     $('customer').value = draft.customerId;
-    $('cash-field').hidden = draft.method !== 'Cash'; $('credit-fields').hidden = draft.method !== 'Credit'; $('digital-fields').hidden = !['GCash','Maya'].includes(draft.method);
+    $('cash-field').hidden = draft.method === 'Credit';
+    $('received-label').textContent = draft.method === 'Cash' ? 'Cash received' : draft.method+' amount received (PHP)';
+    $('credit-fields').hidden = draft.method !== 'Credit'; $('digital-fields').hidden = !['GCash','Maya'].includes(draft.method);
 }
 function showReceipt(record) {
     currentReceipt = record;
     const receipt = record.receipt || record.localReceipt, panel = $('receipt'); panel.hidden = false; panel.replaceChildren();
     panel.append(node('h2',receipt.shop),node('p',(record.status === 'Synced' ? 'SERVER CONFIRMED' : 'SAVED LOCALLY · UPLOAD PENDING')+' · NOT A FISCAL RECEIPT','receipt-note'),node('p',receipt.number+' · '+new Date(receipt.time).toLocaleString('en-PH')));
+    const profile = receipt.receiptProfile || {};
+    if (profile.address) { const address = node('p',profile.address); address.style.whiteSpace='pre-line'; panel.append(address); }
+    if (profile.contact) panel.append(node('p',profile.contact));
     if (record.receipt) panel.append(node('p','Original local receipt: '+record.localReceipt.number,'muted'));
     for (const line of receipt.lines) { const item=node('div','','product'), title=node('p','','spread');title.append(node('span',line.name),node('strong',amount(line.total)));item.append(title,node('small',line.label+' × '+line.quantity+' @ '+amount(line.price)));panel.append(item); }
+    if ((receipt.discount || 0) > 0) panel.append(node('p','Subtotal before discount: '+amount(receipt.subtotal)),node('p','Discount: '+amount(receipt.discount)),node('p','Discount reason: '+receipt.discountReason),node('p','Line totals include their share of the discount.','muted'));
     const total=node('p','','spread');total.append(node('strong','Total'),node('strong',amount(receipt.total)));panel.append(node('hr'),total,node('p','Payment: '+receipt.method));
     if (receipt.method === 'Cash') panel.append(node('p','Cash received: '+amount(receipt.cashReceived)+' · Change: '+amount(receipt.change)));
+    if (['GCash','Maya'].includes(receipt.method)) panel.append(node('p',receipt.method+' amount received: '+(receipt.paymentReceived == null ? 'Not recorded' : amount(receipt.paymentReceived))));
     if (receipt.method === 'Credit') panel.append(node('p','Customer: '+receipt.customer+' · Due: '+(receipt.dueDate || 'Not set')));
-    panel.append(node('p','Owner · Counter 1 · Currency and tax settings pending.','muted'));
+    if (profile.footer) { const footer = node('p',profile.footer); footer.style.whiteSpace='pre-line'; panel.append(footer); }
+    panel.append(node('p','Owner · Counter 1 · Philippine pesos (PHP). Tax calculation is not configured. This sales slip is not a BIR invoice.','muted'));
     const actions=node('div','','form-actions no-print');actions.append(button('Print / Save PDF',()=>window.print()));panel.append(actions);
 }
 function synchronize() {
@@ -161,11 +178,11 @@ $('finish').addEventListener('click',()=>run(async()=>{ const data=await store.s
 $('complete').addEventListener('click',()=>run(async()=>{ const record=await store.complete(); showReceipt(record); notify('Sale '+record.localReceipt.number+' saved locally. Its upload remains pending until confirmed.'); }));
 $('search').addEventListener('input',()=>{ if (state?.snapshot) renderProducts(); });
 $('search-form').addEventListener('submit',event=>{ event.preventDefault(); run(async()=>{ const barcode=$('search').value.trim(); const option=state?.snapshot?.products.flatMap(p=>p.options).find(o=>o.barcode === barcode); if (!option) throw new Error('No matching barcode. Search by product name or SKU.'); await store.edit(d=>{d.cart[option.id]=(d.cart[option.id] || 0)+1;d.confirmed=false;});$('search').value=''; }); });
-for (const [id,key] of [['method','method'],['received','received'],['customer','customerId'],['due-date','dueDate'],['confirmed','confirmed']]) {
-    $(id).addEventListener(['received','due-date'].includes(id) ? 'input' : 'change',async()=>{
+for (const [id,key] of [['method','method'],['received','received'],['customer','customerId'],['due-date','dueDate'],['confirmed','confirmed'],['discount','discount'],['discount-reason','discountReason']]) {
+    $(id).addEventListener(['received','due-date','discount','discount-reason'].includes(id) ? 'input' : 'change',async()=>{
         const value=id === 'confirmed' ? $(id).checked : $(id).value;
         editingFields.set(id,value);
-        try { await store.edit(d=>{d[key]=value;if(id === 'method')d.confirmed=false;}); }
+        try { await store.edit(d=>{d[key]=value;if(['method','received','discount'].includes(id))d.confirmed=false;if(id === 'method')d.received='';}); }
         catch(error) { notify(error.message); }
         finally { if (editingFields.get(id) === value) editingFields.delete(id); }
         await render();
