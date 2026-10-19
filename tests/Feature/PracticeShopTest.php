@@ -212,5 +212,13 @@ class PracticeShopTest extends TestCase
         }
         $this->assertSame(2400, $summary['expiryStock']['knownCost']);
         $this->assertSame(0, $summary['expiryStock']['unknownCostUnits']);
+        if (getenv('DAILY_ACTIVITY_BROWSER_QA')) {
+            User::factory()->create(['id' => User::OWNER_ID, 'name' => 'Calendar QA Owner', 'email' => 'practice-qa@example.test', 'password' => 'Practice-QA-Only42!']);
+            $artifactRoot = $this->originalStorage.'/app/practice';
+            File::ensureDirectoryExists($artifactRoot);
+            $artifact = $artifactRoot.'/calendar-ui-qa-'.bin2hex(random_bytes(8)).'.sqlite';
+            File::copy(config('database.connections.sqlite.database'), $artifact);
+            fwrite(STDOUT, "\nCalendar browser fixture: ".$artifact."\n");
+        }
     }
 }

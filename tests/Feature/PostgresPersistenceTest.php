@@ -75,6 +75,28 @@ class PostgresPersistenceTest extends TestCase
         PosStore::import(['products' => DemoCatalogue::defaults()], 'test-browser');
     }
 
+    public function test_daily_calendar_and_activity_survive_postgresql_reload_without_writes(): void
+    {
+        $this->initialize();
+        SessionCash::open('daily-open', '1000', '');
+        SessionCredit::addCustomer('Daily customer', '');
+        $sale = SessionSales::complete('daily-cash', ['drink-one' => 2], 'Cash', '50', false, '', '', null, false, '1.00', 'Owner promotion');
+        SessionSales::complete('daily-credit', ['drink-one' => 1], 'Credit', '', false, array_key_first(SessionCredit::customers()));
+        SessionCredit::repay('daily-repay', array_key_first(SessionCredit::debts()), '5', 'Cash', '');
+        SessionReturns::complete('daily-return', $sale['id'], [['quantity' => 1, 'disposition' => 'Restock']], 'Cash', true, 'Unopened bottle returned');
+        $date = now('Asia/Shanghai')->toDateString();
+        $expected = SessionAnalytics::dailyActivity($date);
+        $stock = DemoCatalogue::products();
+        $sales = SessionSales::all();
+        DB::purge('pos_test');
+        $this->assertSame($expected, SessionAnalytics::dailyActivity($date));
+        $this->assertSame(3950, SessionAnalytics::summarizeDay($date)['revenue']);
+        $this->assertSame(2450, SessionAnalytics::summarizeDay($date)['collections']);
+        $this->assertSame(3950, SessionAnalytics::calendarMonth(substr($date, 0, 7))['summary']['revenue']);
+        $this->assertSame($stock, DemoCatalogue::products());
+        $this->assertSame($sales, SessionSales::all());
+    }
+
     public function test_unavailable_checkout_release_is_persistent_and_stale_requests_preserve_new_hold(): void
     {
         $this->initialize();

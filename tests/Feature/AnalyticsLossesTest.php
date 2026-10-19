@@ -134,7 +134,7 @@ class AnalyticsLossesTest extends TestCase
 
     public function test_empty_dashboard_and_reports_render_without_invented_revenue_or_profit(): void
     {
-        $this->get('/dashboard')->assertOk()->assertSee('Your sales story starts here')->assertDontSee('Illustrative figures')->assertDontSee('4,800.00');
+        $this->get('/dashboard')->assertOk()->assertSee('sales calendar')->assertSee('No confirmed sales, returns or repayments on this day.')->assertDontSee('Illustrative figures')->assertDontSee('4,800.00');
         $this->get('/reports')->assertOk()->assertSee('Estimated gross profit')->assertSee('No outstanding customer debt');
         $this->assertSame(0, SessionAnalytics::summarize(90)['revenue']);
         $this->assertCount(7, SessionAnalytics::summarize(999)['daily']);
@@ -145,6 +145,6 @@ class AnalyticsLossesTest extends TestCase
         SessionSales::complete('sold-out', ['drink-case' => 3], 'Cash', '1260', false);
         $this->assertSame(0, DemoCatalogue::find(1)['stock']);
         $this->assertSame(1, SessionAnalytics::summarize(7)['lowStock'][0]['id']);
-        $this->get('/dashboard')->assertOk()->assertSee('Low-stock watch')->assertSee('0 bottles');
+        $this->get('/reports')->assertOk()->assertSee('Low-stock watch')->assertSee('0 bottles');
     }
 }

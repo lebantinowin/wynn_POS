@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{ config('pos.practice') ? 'Practice · ' : '' }}Wynn's Mart · {{ $section === 'sales' ? 'Transactions' : ucfirst($section) }}</title>
     <link rel="preload" href="{{ asset('fonts/InterVariable.woff2') }}" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=8">
+    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=9">
     @livewireStyles
 </head>
 <body>
@@ -71,7 +71,7 @@
                 @elseif($section==='losses')<livewire:losses />
                 @elseif($section==='cash')<livewire:cash />
                 @elseif(in_array($section,['dashboard','reports']))
-                <livewire:analytics />
+                <livewire:analytics :calendar="$section === 'dashboard'" />
                 @elseif($section !== 'settings')<section class="panel"><div class="empty-state"><h2>{{ $navigation[$section] }}</h2><p>This workspace is planned for an upcoming step.</p><a class="button" href="/checkout" wire:navigate>Explore sample checkout</a></div></section>@endif
                 @endif
             </div>
