@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{ config('pos.practice') ? 'Practice · ' : '' }}Wynn's Mart · {{ $section === 'sales' ? 'Transactions' : ucfirst($section) }}</title>
     <link rel="preload" href="{{ asset('fonts/InterVariable.woff2') }}" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=9">
+    <link rel="stylesheet" href="{{ asset('css/grocery.css') }}?v=14">
     @livewireStyles
 </head>
 <body>
@@ -28,9 +28,9 @@
     ];
     $descriptions = ['dashboard'=>'A clear view of your shop’s performance.','checkout'=>'Find products, build a cart, and review payments.','products'=>'Manage products, prices, and package options.','inventory'=>'Keep stock counts and incoming deliveries in order.','purchasing'=>'Manage suppliers, plan orders, and receive deliveries.','sales'=>'Search transaction history, reprint receipts, and record returns.','credit'=>'Track grocery credit, money lent, and customer repayments.','losses'=>'Record missing, consumed, damaged, or expired stock.','cash'=>'Keep track of cash sessions and business expenses.','reports'=>'Explore sales, collections, customer balances, and stock losses.','settings'=>'Configure your shop and checkout preferences.'];
 @endphp
-<div class="app" x-data="{menu:false, compact:window.innerWidth <= 900}" @resize.window.debounce.100ms="compact=window.innerWidth <= 900; if(!compact) menu=false" @keydown.escape.window="menu=false" x-effect="document.body.style.overflow = menu && compact ? 'hidden' : ''">
+<div class="app {{ $section === 'checkout' ? 'checkout-page' : '' }}" x-data="wynnWorkspace" :class="{'checkout-fullscreen':checkoutFullscreen}" @resize.window.debounce.100ms="compact=window.innerWidth <= 900; if(!compact) menu=false" @keydown.escape.window="menu=false; exitCheckoutFullscreen()" x-on:fullscreenchange.document="syncCheckoutFullscreen()" x-on:livewire:navigating.document="exitCheckoutFullscreen()" x-effect="document.body.style.overflow = menu && compact ? 'hidden' : ''">
     <button class="scrim" x-show="menu && compact" x-transition.opacity.duration.300ms x-cloak @click="menu=false" aria-label="Close navigation"></button>
-    <aside :class="{'open':menu}" :inert="compact && !menu" :aria-hidden="compact && !menu" aria-label="Main navigation">
+    <aside :class="{'open':menu}" :inert="checkoutFullscreen || (compact && !menu)" :aria-hidden="checkoutFullscreen || (compact && !menu)" aria-label="Main navigation">
         <a class="brand" href="/dashboard" wire:navigate><span class="brand-mark">W</span><div><strong>Wynn's Mart</strong><span>Business workspace</span></div></a>
         <div class="nav-label">WORKSPACE</div>
         <nav>
@@ -51,9 +51,9 @@
             <span class="badge"><span class="badge-dot"></span>{{ config('pos.practice') ? 'Practice shop' : ($databaseStorage && $storageReady ? 'Shared workspace' : 'Sample workspace') }}</span>
         </div>
         <div class="content" wire:transition.navigate>
-            <header class="page-heading"><div><h1>{{ $navigation[$section] }}</h1><p>{{ $descriptions[$section] }}</p></div><span class="badge">Counter 1</span></header>
+            <header class="page-heading"><div><h1>{{ $navigation[$section] }}</h1><p>{{ $descriptions[$section] }}</p></div><div class="page-heading-actions">@if(config('pos.practice') && $section === 'checkout')<x-practice-guide :section="$section" :compact="true" />@endif<span class="badge">Counter 1</span>@if($section === 'checkout')<button type="button" class="checkout-fullscreen-toggle operations-link" @click="toggleCheckoutFullscreen()" :aria-pressed="checkoutFullscreen" aria-pressed="false"><svg class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path x-show="!checkoutFullscreen" d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/><path x-show="checkoutFullscreen" x-cloak d="M3 8h5V3M21 8h-5V3M8 21v-5H3M16 21v-5h5"/></svg><span x-text="checkoutFullscreen ? 'Exit fullscreen' : 'Fullscreen'">Fullscreen</span></button>@endif</div></header>
             <div class="notice preview-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg><span>@if(config('pos.practice'))<strong>Practice shop · Sample records only.</strong> Your practice sales, stock and cash are saved in a separate database. Main shop records are untouched.@elseif($databaseStorage && $storageReady)<strong>Shared shop records.</strong> Changes are saved across browser sessions. Refresh to see updates from another device.@else<strong>Preview mode.</strong> Sales, credit, repayments and stock changes stay in this browser session only.@endif</span></div>
-            @if(config('pos.practice'))<x-practice-guide :section="$section" />@endif
+            @if(config('pos.practice') && $section !== 'checkout')<x-practice-guide :section="$section" />@endif
             @if($databaseStorage && (!$storageReady || $section === 'settings'))<livewire:store-setup />@endif
             <div class="mobile-notice">Mobile access is for analytics. Open Dashboard or Reports; use desktop or tablet for operations.</div>
             @if($databaseStorage && app(\App\Support\OfflineCheckout::class)->active())<div class="notice"><strong>Counter 1 is using offline checkout.</strong> Stock and cash changes are paused. Reports show confirmed records only; pending offline sales are not included. <span class="operations-link"><a href="/offline-checkout.html">Synchronize and finish in the prepared browser</a> · <a href="{{ route('workspace', ['section' => 'settings']) }}#offline-recovery">Unavailable browser? Review recovery</a>.</span></div>@endif
@@ -80,6 +80,44 @@
     </main>
 </div>
 <script>
+window.wynnWorkspace = () => ({
+    menu: false,
+    compact: window.innerWidth <= 900,
+    checkoutFullscreen: false,
+    nativeFullscreen: false,
+    async toggleCheckoutFullscreen() {
+        if (this.checkoutFullscreen) {
+            this.exitCheckoutFullscreen();
+            return;
+        }
+        this.menu = false;
+        this.checkoutFullscreen = true;
+        if (document.fullscreenEnabled && document.documentElement.requestFullscreen) {
+            this.nativeFullscreen = true;
+            try {
+                await document.documentElement.requestFullscreen();
+                if (!this.checkoutFullscreen && document.fullscreenElement === document.documentElement) {
+                    await document.exitFullscreen();
+                }
+            } catch {
+                this.nativeFullscreen = false;
+            }
+        }
+    },
+    exitCheckoutFullscreen() {
+        this.checkoutFullscreen = false;
+        if (this.nativeFullscreen && document.fullscreenElement === document.documentElement) {
+            document.exitFullscreen().catch(() => {});
+        }
+        this.nativeFullscreen = false;
+    },
+    syncCheckoutFullscreen() {
+        if (this.nativeFullscreen && !document.fullscreenElement) {
+            this.checkoutFullscreen = false;
+            this.nativeFullscreen = false;
+        }
+    },
+});
 document.addEventListener('livewire:init', () => {
     Livewire.hook('request', ({ fail }) => {
         fail(({ status, preventDefault }) => {

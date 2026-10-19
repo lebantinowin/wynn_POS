@@ -1,7 +1,8 @@
-@props(['section'])
-<section class="panel practice-guide operations-link" aria-label="Owner practice walkthrough">
-    <details @if($section === 'dashboard') open @endif>
-        <summary><strong>Owner practice walkthrough</strong><span class="muted">Manual entry · No scanner or printer needed</span></summary>
+@props(['section', 'compact' => false])
+<section class="practice-guide operations-link {{ $compact ? 'checkout-help' : 'panel' }}" aria-label="Owner practice walkthrough">
+    <details @if($section === 'dashboard') open @endif @if($compact) x-data @click.outside="$el.open=false" @keydown.escape.window="$el.open=false" @endif>
+        <summary><strong>{{ $compact ? 'Help' : 'Owner practice walkthrough' }}</strong>@unless($compact)<span class="muted">Manual entry · No scanner or printer needed</span>@endunless</summary>
+        @if($compact)<div class="checkout-help-content"><h2>Owner practice walkthrough</h2>@endif
         <p class="muted">Follow these steps once in a fresh practice shop. Relaunching keeps your progress and does not reset records. The expected totals below apply to this sequence only; extra transactions change them.</p>
         <ol class="practice-steps">
             <li><a href="{{ route('workspace', ['section' => 'products']) }}" wire:navigate>Review the sample product</a><p>Practice biscuits starts with 12 pieces. Base cost: ₱4 each. Individual: ₱10, barcode <code>PRAC001</code>. Pack of 3: ₱28, barcode <code>PRAC003</code>. An opening batch has a recorded expiry date.</p></li>
@@ -15,5 +16,6 @@
             <li><a href="{{ route('workspace', ['section' => 'reports']) }}" wire:navigate>Compare reports and exports</a><p>For this sequence: net sales ₱48, collections ₱58, sales cost ₱20, gross profit ₱28, operating profit ₱19, stock 6 pieces / ₱24 value, and customer balance ₱20. Download a CSV and open Print view. Confirm both are marked as practice.</p></li>
         </ol>
         <p class="notice">This prepares owner review. It does not mark owner acceptance complete or issue BIR invoices. Confirm the result of your practice run before moving to live use.</p>
+        @if($compact)</div>@endif
     </details>
 </section>

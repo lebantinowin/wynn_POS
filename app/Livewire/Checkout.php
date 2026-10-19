@@ -9,6 +9,7 @@ use App\Support\SessionBatches;
 use App\Support\SessionCash;
 use App\Support\SessionCredit;
 use App\Support\SessionSales;
+use App\Support\ShopPreferences;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -229,6 +230,33 @@ class Checkout extends Component
         $this->message = "Sale {$sale['number']} completed. Stock and batch costs updated.";
     }
 
+    private function liveReceipt(array $pricing, string $discountError): ?array
+    {
+        if ($pricing['lines'] === [] || $discountError !== '' || ! in_array($this->method, ['Cash', 'GCash', 'Maya', 'Credit'], true)) {
+            return null;
+        }
+        $received = null;
+        if (preg_match('/^\d{1,12}(\.\d{1,2})?$/', $this->received)) {
+            [$whole, $fraction] = array_pad(explode('.', $this->received, 2), 2, '');
+            $received = (int) $whole * 100 + (int) str_pad($fraction, 2, '0');
+        }
+        $profile = app(ShopPreferences::class)->receiptProfile();
+        $customer = SessionCredit::customers()[$this->customerId] ?? null;
+        $paymentStatus = match ($this->method) {
+            'Cash' => $received === null ? 'Payment not entered.' : ($received < $pricing['total'] ? 'Cash received is below the total.' : ''),
+            'Credit' => $customer === null ? 'Select a credit customer.' : 'Will be recorded as grocery credit when completed.',
+            default => ! $this->confirmed ? 'Awaiting app verification.' : ($received === $pricing['total'] ? 'App payment verified by owner.' : 'Received amount must match the total.'),
+        };
+
+        return ['shop' => $profile['shopName'], 'receiptProfile' => $profile, 'lines' => $pricing['lines'],
+            'subtotal' => $pricing['subtotal'], 'discount' => $pricing['discount'], 'discountReason' => $pricing['discountReason'] ?? '',
+            'total' => $pricing['total'], 'method' => $this->method, 'cashReceived' => $this->method === 'Cash' ? $received : null,
+            'paymentReceived' => $this->method !== 'Credit' ? $received : null,
+            'change' => $this->method === 'Cash' && $received !== null && $received >= $pricing['total'] ? $received - $pricing['total'] : null,
+            'customer' => $this->method === 'Credit' ? ($customer['name'] ?? 'Not selected') : null, 'dueDate' => $this->dueDate,
+            'paymentStatus' => $paymentStatus];
+    }
+
     public function render(): View
     {
         $products = array_filter(DemoCatalogue::products(), fn ($p) => $this->search === '' || str_contains(strtolower($p['name'].' '.$p['sku'].' '.implode(' ', array_column($p['options'], 'barcode'))), strtolower($this->search)));
@@ -244,6 +272,7 @@ class Checkout extends Component
 
         return view('livewire.checkout', ['products' => $products, 'lines' => $pricing['lines'], 'total' => $pricing['total'],
             'subtotal' => $subtotal, 'discountAmount' => $pricing['discount'], 'discountError' => $discountError,
+            'liveReceipt' => $this->liveReceipt($pricing, $discountError),
             'customers' => SessionCredit::customers(), 'cashSession' => SessionCash::active(), 'batchStock' => SessionBatches::overview()['products'],
             'heldCarts' => CheckoutCarts::held(), 'canHoldCart' => CheckoutCarts::available()]);
     }
