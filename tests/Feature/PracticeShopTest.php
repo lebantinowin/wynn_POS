@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Livewire\Checkout;
 use App\Models\User;
 use App\Support\DatabaseBackups;
 use App\Support\DemoCatalogue;
@@ -17,6 +18,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
+use Livewire\Livewire;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -220,5 +222,45 @@ class PracticeShopTest extends TestCase
             File::copy(config('database.connections.sqlite.database'), $artifact);
             fwrite(STDOUT, "\nCalendar browser fixture: ".$artifact."\n");
         }
+
+        SessionCash::open('advanced-opening', '1000', '');
+        $checkout = Livewire::test(Checkout::class)->call('add', 'practice-pack')->call('add', 'practice-one')
+            ->set(['discount' => '3', 'discountReason' => 'Practice continuation'])
+            ->assertViewHas('liveReceipt', fn (array $receipt): bool => $receipt['total'] === 3500);
+        $heldId = $checkout->get('saleEventId');
+        $checkout->call('holdCart')->assertHasNoErrors()->assertSet('cart', [])
+            ->call('resumeCart', $heldId)->assertHasNoErrors()->assertSet('discount', '3')
+            ->set('received', '100')->assertViewHas('liveReceipt', fn (array $receipt): bool => $receipt['change'] === 6500)
+            ->call('complete')->assertHasNoErrors()->assertSee('Print receipt');
+        $discountedSale = $checkout->get('receipt');
+        $this->assertSame(2, DemoCatalogue::find(1)['stock']);
+        $returnLines = array_map(fn (array $line): array => ['quantity' => $line['id'] === 'practice-pack' ? 1 : 0, 'disposition' => 'Restock'], $discountedSale['lines']);
+        $discountedReturn = SessionReturns::complete('advanced-return', $discountedSale['id'], $returnLines, 'Cash', true, 'Practice discounted pack return');
+        $this->assertSame(2578, $discountedReturn['refund']);
+        $this->assertSame(5, DemoCatalogue::find(1)['stock']);
+        foreach (['GCash' => '9', 'Maya' => '10'] as $method => $received) {
+            $checkout->call('add', 'practice-one')->set('method', $method)
+                ->set(['discount' => $method === 'GCash' ? '1' : '', 'discountReason' => $method === 'GCash' ? 'Practice app promotion' : ''])
+                ->set(['received' => $received, 'confirmed' => true])->call('complete')->assertHasNoErrors()
+                ->assertSet('receipt.paymentReceived', (int) $received * 100);
+        }
+        $secondClose = SessionCash::close(SessionCash::active()['id'], 'advanced-close', '1009.22', '');
+        $this->assertSame(100922, $secondClose['summary']['expected']);
+        $this->assertSame(0, $secondClose['difference']);
+        $this->assertSame(3, DemoCatalogue::find(1)['stock']);
+        $this->assertCount(5, SessionSales::all());
+        $this->assertCount(2, SessionReturns::all());
+        $overall = SessionAnalytics::summarizeAll();
+        $day = SessionAnalytics::summarizeDay(now('Asia/Shanghai')->toDateString());
+        foreach (['revenue' => 7622, 'collections' => 8622, 'knownSalesCost' => 3200, 'grossProfit' => 4422, 'operatingProfit' => 3522, 'outstanding' => 2000] as $key => $expected) {
+            $this->assertSame($expected, $overall[$key], $key);
+            $this->assertSame($expected, $day[$key], $key);
+        }
+        $this->assertSame(1200, $overall['expiryStock']['knownCost']);
+        $activity = SessionAnalytics::dailyActivity(now('Asia/Shanghai')->toDateString());
+        $this->assertSame(7622, $activity['sales']);
+        $this->assertSame(8622, $activity['collections']);
+        $this->get('/dashboard')->assertOk()->assertSee('₱76.22')->assertSee('₱35.22');
+        $this->get('/reports')->assertOk()->assertSee('₱86.22')->assertSee('₱44.22');
     }
 }
